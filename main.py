@@ -27,6 +27,8 @@ def parse_args():
                    help="use NeighborLoader mini-batching (for large graphs / GAT)")
     p.add_argument("--features", choices=["random", "text"], default=None,
                    help="node feature mode (overrides config)")
+    p.add_argument("--hard-negatives", action="store_true",
+                   help="use 2-hop hard negatives for training")
     p.add_argument("--no-plot", action="store_true")
     return p.parse_args()
 
@@ -40,6 +42,8 @@ def main():
         cfg.use_neighbor_loader = True
     if args.features:
         cfg.feature_mode = args.features
+    if args.hard_negatives:
+        cfg.hard_negatives = True
 
     print("Device:", get_device())
     print("Loading + building subgraph...")

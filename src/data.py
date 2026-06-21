@@ -111,6 +111,88 @@ def build_node_features(all_ids, sub, cfg=cfg):
     raise ValueError(f"Unknown feature_mode: {cfg.feature_mode}")
 
 
+def _existing_edge_set(edge_index):
+    """Set of (u,v) tuples for fast 'does this edge exist' lookup (undirected)."""
+    s = set()
+    ei = edge_index.cpu().numpy()
+    for u, v in zip(ei[0], ei[1]):
+        s.add((int(u), int(v)))
+        s.add((int(v), int(u)))
+    return s
+
+
+def make_hard_negatives(train_data, num_nodes, n_hard, msg_edge_index, seed=0):
+    """Generate ~n_hard '2-hop' negative edges: pairs (u, w) where u and w share
+    a common neighbor v (so they're structurally plausible) but have no real edge.
+
+    Returns a [2, M] tensor of negative edges (M may be < n_hard if sampling
+    runs out of attempts). Uses the message-passing graph to find neighbors.
+    """
+    import random as _random
+    rng = _random.Random(seed)
+
+    ei = msg_edge_index.cpu().numpy()
+    # Build adjacency list.
+    adj = {}
+    for u, v in zip(ei[0], ei[1]):
+        adj.setdefault(int(u), []).append(int(v))
+        adj.setdefault(int(v), []).append(int(u))
+    nodes_with_nbrs = [n for n in adj if adj[n]]
+
+    existing = _existing_edge_set(msg_edge_index)
+    # Also treat the positive supervision edges as existing.
+    pos_mask = train_data.edge_label == 1
+    existing |= _existing_edge_set(train_data.edge_label_index[:, pos_mask])
+
+    hard = []
+    attempts = 0
+    max_attempts = n_hard * 20
+    while len(hard) < n_hard and attempts < max_attempts:
+        attempts += 1
+        # Pick a random node u, hop to a neighbor v, hop to a neighbor w.
+        u = rng.choice(nodes_with_nbrs)
+        v = rng.choice(adj[u])
+        if not adj.get(v):
+            continue
+        w = rng.choice(adj[v])
+        if w == u or (u, w) in existing:
+            continue
+        hard.append((u, w))
+        existing.add((u, w)); existing.add((w, u))  # avoid duplicates
+
+    if not hard:
+        return torch.empty((2, 0), dtype=torch.long)
+    return torch.tensor(np.array(hard).T, dtype=torch.long)
+
+
+def apply_hard_negatives(train_data, num_nodes, msg_edge_index, cfg=cfg):
+    """Replace a fraction of the training split's random negatives with hard ones.
+
+    Val/test splits are left untouched (random negatives) for fair evaluation.
+    """
+    labels = train_data.edge_label
+    eidx = train_data.edge_label_index
+    neg_mask = labels == 0
+    n_neg = int(neg_mask.sum())
+    n_hard = int(n_neg * cfg.hard_neg_fraction)
+    if n_hard == 0:
+        return train_data
+
+    hard = make_hard_negatives(train_data, num_nodes, n_hard, msg_edge_index, cfg.seed)
+    if hard.shape[1] == 0:
+        print("Warning: no hard negatives found; keeping random negatives.")
+        return train_data
+
+    # Replace the first `hard.shape[1]` negative slots with hard negatives.
+    neg_positions = torch.where(neg_mask)[0][: hard.shape[1]]
+    eidx = eidx.clone()
+    eidx[:, neg_positions] = hard.to(eidx.device)
+    train_data.edge_label_index = eidx
+    print(f"Hard negatives: replaced {hard.shape[1]:,} of {n_neg:,} train negatives "
+          f"with 2-hop pairs")
+    return train_data
+
+
 def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
     """Turn the subgraph edge table into train/val/test PyG Data objects.
 
@@ -161,4 +243,10 @@ def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
 
     meta = {"id2idx": id2idx, "node_type_arr": node_type_arr,
             "num_nodes": num_nodes, "feature_dim": x.shape[1]}
+
+    if cfg.hard_negatives:
+        train_data = apply_hard_negatives(
+            train_data, num_nodes, train_data.edge_index, cfg
+        )
+
     return train_data, val_data, test_data, meta

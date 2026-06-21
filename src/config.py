@@ -59,6 +59,14 @@ class Config:
     test_ratio: float = 0.1
     neg_sampling_ratio: float = 1.0
 
+    # Hard negative sampling (TRAINING only; val/test stay random for fair eval).
+    # When True, training negatives are 2-hop pairs (share a neighbor but have no
+    # edge) instead of fully random pairs. These are "harder" and push the model
+    # to learn finer distinctions, which tends to improve MRR / Hits@K.
+    hard_negatives: bool = False
+    hard_neg_fraction: float = 0.5   # fraction of train negatives that are hard
+                                     # (rest stay random, for stability)
+
     # --- Sampling (for large graphs / GAT) ---
     # If True, use NeighborLoader mini-batching instead of full-graph training.
     # Recommended when the graph is large or GAT runs out of memory.
