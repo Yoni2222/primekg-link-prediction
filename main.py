@@ -25,6 +25,8 @@ def parse_args():
     p.add_argument("--lr", type=float, default=cfg.lr)
     p.add_argument("--sampling", action="store_true",
                    help="use NeighborLoader mini-batching (for large graphs / GAT)")
+    p.add_argument("--features", choices=["random", "text"], default=None,
+                   help="node feature mode (overrides config)")
     p.add_argument("--no-plot", action="store_true")
     return p.parse_args()
 
@@ -36,6 +38,8 @@ def main():
     cfg.lr = args.lr
     if args.sampling:
         cfg.use_neighbor_loader = True
+    if args.features:
+        cfg.feature_mode = args.features
 
     print("Device:", get_device())
     print("Loading + building subgraph...")

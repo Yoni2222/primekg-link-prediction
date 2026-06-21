@@ -28,8 +28,15 @@ class Config:
     target_relations: tuple | None = None
 
     # --- Graph / features ---
-    feature_dim: int = 64
+    feature_dim: int = 64             # used only when feature_mode == "random"
     seed: int = 42
+
+    # How to initialize node features:
+    #   "random" - random vectors of size feature_dim (learns from structure only)
+    #   "text"   - sentence-transformer embeddings of each node's name
+    feature_mode: str = "random"
+    text_model: str = "all-MiniLM-L6-v2"   # sentence-transformer model (384-dim)
+    text_cache: str = "./data/node_text_emb.npy"  # cached embeddings
 
     # --- Model ---
     hidden_dim: int = 64          # keep modest so GAT fits in T4 memory
@@ -61,7 +68,7 @@ class Config:
 
     # --- Evaluation ---
     hits_k: tuple = (10, 50)          # report Hits@10, Hits@50
-    decision_threshold: float = 0.7   # for precision/recall/F1
+    decision_threshold: float = 0.5   # for precision/recall/F1
     rank_eval_batch: int = 2048       # batch size for MRR/Hits ranking eval
 
     # --- Which models to compare ---

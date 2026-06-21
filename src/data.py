@@ -59,6 +59,58 @@ def build_subgraph(
     return sub
 
 
+def _node_name_map(sub: pd.DataFrame) -> dict:
+    """Map node id -> human-readable name, from both edge endpoints."""
+    names = pd.concat([
+        sub[["x_id", "x_name"]].rename(columns={"x_id": "id", "x_name": "name"}),
+        sub[["y_id", "y_name"]].rename(columns={"y_id": "id", "y_name": "name"}),
+    ]).drop_duplicates("id")
+    return names.set_index("id")["name"].to_dict()
+
+
+def build_node_features(all_ids, sub, cfg=cfg):
+    """Return a [num_nodes, D] feature tensor according to cfg.feature_mode.
+
+    "random": random vectors of size cfg.feature_dim.
+    "text":   sentence-transformer embeddings of each node's name (cached).
+    """
+    num_nodes = len(all_ids)
+
+    if cfg.feature_mode == "random":
+        torch.manual_seed(cfg.seed)
+        return torch.randn(num_nodes, cfg.feature_dim)
+
+    if cfg.feature_mode == "text":
+        import os
+        # Use cache if present and matches the node count.
+        if os.path.exists(cfg.text_cache):
+            cached = np.load(cfg.text_cache)
+            if cached.shape[0] == num_nodes:
+                print(f"Loaded cached text embeddings {cached.shape}")
+                return torch.tensor(cached, dtype=torch.float)
+            print("Cache size mismatch; recomputing text embeddings.")
+
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise SystemExit(
+                "feature_mode='text' needs sentence-transformers:\n"
+                "  pip install sentence-transformers"
+            )
+
+        name_map = _node_name_map(sub)
+        names = [str(name_map.get(nid, "")) for nid in all_ids]
+        print(f"Encoding {len(names)} node names with {cfg.text_model} ...")
+        model = SentenceTransformer(cfg.text_model)
+        emb = model.encode(names, batch_size=256, show_progress_bar=True,
+                           convert_to_numpy=True)
+        np.save(cfg.text_cache, emb)
+        print(f"Saved text embeddings to {cfg.text_cache} {emb.shape}")
+        return torch.tensor(emb, dtype=torch.float)
+
+    raise ValueError(f"Unknown feature_mode: {cfg.feature_mode}")
+
+
 def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
     """Turn the subgraph edge table into train/val/test PyG Data objects.
 
@@ -80,8 +132,7 @@ def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
     dst = sub["y_id"].map(id2idx).to_numpy()
     edge_index = torch.tensor(np.vstack([src, dst]), dtype=torch.long)
 
-    torch.manual_seed(cfg.seed)
-    x = torch.randn(num_nodes, cfg.feature_dim)
+    x = build_node_features(all_ids, sub, cfg)
     data = Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
 
     if cfg.target_relations:
@@ -108,5 +159,6 @@ def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
         )
         train_data, val_data, test_data = transform(data)
 
-    meta = {"id2idx": id2idx, "node_type_arr": node_type_arr, "num_nodes": num_nodes}
+    meta = {"id2idx": id2idx, "node_type_arr": node_type_arr,
+            "num_nodes": num_nodes, "feature_dim": x.shape[1]}
     return train_data, val_data, test_data, meta
