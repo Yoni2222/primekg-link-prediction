@@ -85,18 +85,37 @@ def evaluate_ranking(model, data, num_nodes, cfg=cfg, num_neg_per_pos=100, seed=
     return metrics
 
 
+def _best_f1_threshold(prob, true, num_steps=101):
+    """Find the threshold in [0,1] that maximizes F1 on (prob, true).
+    Returns (best_threshold, best_f1)."""
+    best_t, best_f1 = 0.5, -1.0
+    for t in np.linspace(0.0, 1.0, num_steps):
+        pred = (prob >= t).astype(int)
+        f1 = f1_score(true, pred, zero_division=0)
+        if f1 > best_f1:
+            best_f1, best_t = f1, float(t)
+    return best_t, best_f1
+
+
 @torch.no_grad()
-def evaluate(model, data, cfg=cfg, full_metrics=False, num_nodes=None):
+def evaluate(model, data, cfg=cfg, full_metrics=False, num_nodes=None, threshold=None):
     """AUC (always); plus AP/accuracy/precision/recall/F1 and per-query
-    MRR/Hits@K when full_metrics=True. num_nodes is required for ranking."""
+    MRR/Hits@K when full_metrics=True. num_nodes is required for ranking.
+
+    threshold: if given, use it for label decisions; otherwise fall back to
+    cfg.decision_threshold. (Pass the validation-chosen threshold when scoring
+    the test set to avoid tuning on test.)
+    """
     model.eval()
     out = model(data.x, data.edge_index, data.edge_label_index)
     prob = out.sigmoid().cpu().numpy()
     true = data.edge_label.cpu().numpy()
 
+    thr = cfg.decision_threshold if threshold is None else threshold
     metrics = {"auc": roc_auc_score(true, prob)}
     if full_metrics:
-        pred_label = (prob >= cfg.decision_threshold).astype(int)
+        pred_label = (prob >= thr).astype(int)
+        metrics["threshold"] = thr
         metrics["ap"] = average_precision_score(true, prob)
         metrics["accuracy"] = accuracy_score(true, pred_label)
         metrics["precision"] = precision_score(true, pred_label, zero_division=0)
@@ -140,7 +159,15 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
 
         if val_m["auc"] > best_val_auc + cfg.min_delta:
             best_val_auc = val_m["auc"]
-            best_test_metrics = evaluate(model, te, cfg, full_metrics=True, num_nodes=N)
+            # Pick the decision threshold that maximizes F1 on validation,
+            # then score the test set with THAT threshold (no test tuning).
+            model.eval()
+            with torch.no_grad():
+                v_prob = model(va.x, va.edge_index, va.edge_label_index).sigmoid().cpu().numpy()
+            v_true = va.edge_label.cpu().numpy()
+            best_t, _ = _best_f1_threshold(v_prob, v_true)
+            best_test_metrics = evaluate(model, te, cfg, full_metrics=True,
+                                         num_nodes=N, threshold=best_t)
             epochs_without_improve = 0
         else:
             epochs_without_improve += 1
@@ -165,7 +192,8 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
 
     if verbose:
         m = best_test_metrics
-        print(f"\n[{conv_type.upper()}] best val AUC {best_val_auc:.4f}")
+        print(f"\n[{conv_type.upper()}] best val AUC {best_val_auc:.4f}  "
+              f"(test threshold {m.get('threshold', cfg.decision_threshold):.3f})")
         print(f"   test: AUC {m['auc']:.4f}  AP {m['ap']:.4f}  acc {m['accuracy']:.4f}  "
               f"prec {m['precision']:.4f}  rec {m['recall']:.4f}  F1 {m['f1']:.4f}  "
               f"MRR {m['mrr']:.4f}  " +
@@ -240,7 +268,15 @@ def run_experiment_sampled(conv_type, train_data, val_data, test_data, cfg=cfg, 
         val_m = evaluate(model, val_data.to(device), cfg, full_metrics=True, num_nodes=train_data.num_nodes)
         if val_m["auc"] > best_val_auc:
             best_val_auc = val_m["auc"]
-            best_test_metrics = evaluate(model, test_data.to(device), cfg, full_metrics=True, num_nodes=train_data.num_nodes)
+            model.eval()
+            with torch.no_grad():
+                vd = val_data.to(device)
+                v_prob = model(vd.x, vd.edge_index, vd.edge_label_index).sigmoid().cpu().numpy()
+            v_true = val_data.edge_label.cpu().numpy()
+            best_t, _ = _best_f1_threshold(v_prob, v_true)
+            best_test_metrics = evaluate(model, test_data.to(device), cfg,
+                                         full_metrics=True, num_nodes=train_data.num_nodes,
+                                         threshold=best_t)
         history.append({"epoch": epoch, "loss": total_loss,
                         "train": train_m, "val": val_m})
         if verbose and epoch % 5 == 0:
