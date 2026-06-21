@@ -1,0 +1,41 @@
+# ---- Virtual environments ----
+venv/
+env/
+.venv/
+ENV/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---- Data (PrimeKG CSVs are large — don't commit) ----
+data/
+*.csv
+*.tab
+
+# ---- Results / outputs ----
+results/
+*.png
+*.pt
+*.pth
+*.ckpt
+
+# ---- Notebooks ----
+.ipynb_checkpoints/
+
+# ---- IDE / editors ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ---- Environment / secrets ----
+.env
+*.log

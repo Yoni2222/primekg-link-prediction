@@ -1,0 +1,12 @@
+# Install with:
+#   pip install -r requirements.txt
+#
+# Note: torch-geometric may require PyTorch to be installed first.
+# See https://pytorch.org for the right command for your system.
+
+torch
+torch-geometric
+pandas
+numpy
+scikit-learn
+matplotlib
