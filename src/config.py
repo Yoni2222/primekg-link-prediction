@@ -50,7 +50,7 @@ class Config:
     # --- Split ---
     val_ratio: float = 0.1
     test_ratio: float = 0.1
-    neg_sampling_ratio: float = 3.0
+    neg_sampling_ratio: float = 1.0
 
     # --- Sampling (for large graphs / GAT) ---
     # If True, use NeighborLoader mini-batching instead of full-graph training.
