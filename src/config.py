@@ -61,7 +61,7 @@ class Config:
 
     # --- Evaluation ---
     hits_k: tuple = (10, 50)          # report Hits@10, Hits@50
-    decision_threshold: float = 0.5   # for precision/recall/F1
+    decision_threshold: float = 0.7   # for precision/recall/F1
     rank_eval_batch: int = 2048       # batch size for MRR/Hits ranking eval
 
     # --- Which models to compare ---
