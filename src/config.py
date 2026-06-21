@@ -38,14 +38,19 @@ class Config:
     dropout: float = 0.5
 
     # --- Training ---
-    epochs: int = 100
+    epochs: int = 300
     lr: float = 0.01
     weight_decay: float = 5e-4
+
+    # Early stopping: stop if val AUC doesn't improve for `patience` epochs.
+    # Set patience=0 to disable early stopping and always run all epochs.
+    patience: int = 30
+    min_delta: float = 1e-4    # minimum improvement to count as "better"
 
     # --- Split ---
     val_ratio: float = 0.1
     test_ratio: float = 0.1
-    neg_sampling_ratio: float = 1.0
+    neg_sampling_ratio: float = 3.0
 
     # --- Sampling (for large graphs / GAT) ---
     # If True, use NeighborLoader mini-batching instead of full-graph training.
@@ -57,6 +62,7 @@ class Config:
     # --- Evaluation ---
     hits_k: tuple = (10, 50)          # report Hits@10, Hits@50
     decision_threshold: float = 0.5   # for precision/recall/F1
+    rank_eval_batch: int = 2048       # batch size for MRR/Hits ranking eval
 
     # --- Which models to compare ---
     models: tuple = ("gcn", "gat")

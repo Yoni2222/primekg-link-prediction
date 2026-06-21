@@ -27,46 +27,68 @@ def _train_epoch(model, optimizer, data):
     return loss.item()
 
 
-def _hits_at_k(prob, true, k):
-    """Ranking-based Hits@K for link prediction.
+@torch.no_grad()
+def evaluate_ranking(model, data, num_nodes, cfg=cfg, num_neg_per_pos=100, seed=0):
+    """Per-query ranking metrics (MRR, Hits@K) the standard KG way.
 
-    For each positive edge, count how many negative edges score strictly
-    higher. The positive is a "hit" if fewer than k negatives outrank it
-    (its rank among negatives is within the top k). Returns the fraction of
-    positive edges that are hits. This is the standard KG-style Hits@K and,
-    unlike a global top-k cutoff, does not saturate to 1.0 trivially.
+    For each POSITIVE edge (u, v), we corrupt the tail: sample `num_neg_per_pos`
+    random nodes v' and score (u, v'). The positive's rank is its position among
+    these corrupted negatives (rank 1 = beats all of them). MRR and Hits@K are
+    then averaged over all positive edges.
+
+    This is fundamentally different from pooling all positives against all
+    negatives globally (which makes rank-1 nearly impossible and yields
+    misleadingly tiny numbers). Here each positive competes only against its own
+    sampled negative set, matching OGB / KG-benchmark convention.
     """
-    prob = np.asarray(prob)
-    true = np.asarray(true)
-    pos = prob[true == 1]
-    neg = prob[true == 0]
-    if len(pos) == 0 or len(neg) == 0:
-        return 0.0
-    neg_asc = np.sort(neg)                    # ascending
-    # number of negatives scoring strictly higher than each positive:
-    num_neg_above = len(neg) - np.searchsorted(neg_asc, pos, side="right")
-    hits = np.sum(num_neg_above < k)
-    return float(hits) / len(pos)
+    model.eval()
+    device = next(model.parameters()).device
 
+    # Use only the true positive edges from this split's supervision set.
+    elabel = data.edge_label
+    eidx = data.edge_label_index
+    pos_mask = elabel == 1
+    pos_edges = eidx[:, pos_mask]                       # [2, P]
+    P = pos_edges.shape[1]
+    if P == 0:
+        return {"mrr": 0.0, **{f"hits@{k}": 0.0 for k in cfg.hits_k}}
 
-def _mrr(prob, true):
-    """Mean Reciprocal Rank: average of 1/rank over positive edges, where rank
-    is the position of each positive among the negatives (1 = best)."""
-    prob = np.asarray(prob)
-    true = np.asarray(true)
-    pos = prob[true == 1]
-    neg = prob[true == 0]
-    if len(pos) == 0 or len(neg) == 0:
-        return 0.0
-    neg_asc = np.sort(neg)
-    num_neg_above = len(neg) - np.searchsorted(neg_asc, pos, side="right")
-    ranks = num_neg_above + 1                 # rank 1 = no negative above
-    return float(np.mean(1.0 / ranks))
+    # Encode the whole graph once.
+    z = model.encode(data.x, data.edge_index)
+
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    src = pos_edges[0]                                  # [P]
+    dst = pos_edges[1]                                  # [P]
+    pos_scores = (z[src] * z[dst]).sum(dim=-1)          # [P]
+
+    # Process positives in batches so the [batch, N, D] tensor stays small.
+    # (Materializing [P, N, D] at once OOMs for large P.)
+    ranks = torch.empty(P, dtype=torch.long)
+    batch = getattr(cfg, "rank_eval_batch", 2048)
+    for start in range(0, P, batch):
+        end = min(start + batch, P)
+        b_src = src[start:end]                          # [b]
+        b_pos = pos_scores[start:end]                   # [b]
+        neg_dst = torch.randint(
+            0, num_nodes, (end - start, num_neg_per_pos), generator=g
+        ).to(device)                                    # [b, N]
+        z_src = z[b_src].unsqueeze(1)                   # [b, 1, D]
+        z_negd = z[neg_dst]                             # [b, N, D]
+        neg_scores = (z_src * z_negd).sum(dim=-1)       # [b, N]
+        greater = (neg_scores >= b_pos.unsqueeze(1)).sum(dim=1)  # [b]
+        ranks[start:end] = (greater + 1).cpu()
+
+    ranks = ranks.numpy()
+    metrics = {"mrr": float(np.mean(1.0 / ranks))}
+    for k in cfg.hits_k:
+        metrics[f"hits@{k}"] = float(np.mean(ranks <= k))
+    return metrics
 
 
 @torch.no_grad()
-def evaluate(model, data, cfg=cfg, full_metrics=False):
-    """Return AUC (always) plus AP / F1 / Hits@K when full_metrics=True."""
+def evaluate(model, data, cfg=cfg, full_metrics=False, num_nodes=None):
+    """AUC (always); plus AP/accuracy/precision/recall/F1 and per-query
+    MRR/Hits@K when full_metrics=True. num_nodes is required for ranking."""
     model.eval()
     out = model(data.x, data.edge_index, data.edge_label_index)
     prob = out.sigmoid().cpu().numpy()
@@ -80,9 +102,13 @@ def evaluate(model, data, cfg=cfg, full_metrics=False):
         metrics["precision"] = precision_score(true, pred_label, zero_division=0)
         metrics["recall"] = recall_score(true, pred_label, zero_division=0)
         metrics["f1"] = f1_score(true, pred_label, zero_division=0)
-        metrics["mrr"] = _mrr(prob, true)
-        for k in cfg.hits_k:
-            metrics[f"hits@{k}"] = _hits_at_k(prob, true, k)
+        if num_nodes is not None:
+            rank_m = evaluate_ranking(model, data, num_nodes, cfg)
+            metrics.update(rank_m)
+        else:
+            metrics["mrr"] = float("nan")
+            for k in cfg.hits_k:
+                metrics[f"hits@{k}"] = float("nan")
     return metrics
 
 
@@ -100,19 +126,24 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
     )
 
     tr, va, te = train_data.to(device), val_data.to(device), test_data.to(device)
+    N = tr.num_nodes
 
     best_val_auc, best_test_metrics = 0.0, None
     history = []   # list of dicts: per-epoch train & val metrics
+    epochs_without_improve = 0
     for epoch in range(1, cfg.epochs + 1):
         loss = _train_epoch(model, optimizer, tr)
 
         # Full metrics on BOTH train and val every epoch.
-        train_m = evaluate(model, tr, cfg, full_metrics=True)
-        val_m = evaluate(model, va, cfg, full_metrics=True)
+        train_m = evaluate(model, tr, cfg, full_metrics=True, num_nodes=N)
+        val_m = evaluate(model, va, cfg, full_metrics=True, num_nodes=N)
 
-        if val_m["auc"] > best_val_auc:
+        if val_m["auc"] > best_val_auc + cfg.min_delta:
             best_val_auc = val_m["auc"]
-            best_test_metrics = evaluate(model, te, cfg, full_metrics=True)
+            best_test_metrics = evaluate(model, te, cfg, full_metrics=True, num_nodes=N)
+            epochs_without_improve = 0
+        else:
+            epochs_without_improve += 1
 
         history.append({"epoch": epoch, "loss": loss,
                         "train": train_m, "val": val_m})
@@ -124,6 +155,13 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
                   f"| val: acc {val_m['accuracy']:.3f} f1 {val_m['f1']:.3f} "
                   f"prec {val_m['precision']:.3f} rec {val_m['recall']:.3f} "
                   f"auc {val_m['auc']:.3f}")
+
+        # Early stopping: stop if val AUC hasn't improved for `patience` epochs.
+        if cfg.patience and epochs_without_improve >= cfg.patience:
+            if verbose:
+                print(f"[{conv_type.upper()}] early stopping at epoch {epoch} "
+                      f"(no val-AUC improvement for {cfg.patience} epochs)")
+            break
 
     if verbose:
         m = best_test_metrics
@@ -198,11 +236,11 @@ def run_experiment_sampled(conv_type, train_data, val_data, test_data, cfg=cfg, 
             total_loss += loss.item()
 
         # Full-graph eval is usually fine on CPU/GPU since it has no backward pass.
-        train_m = evaluate(model, train_data.to(device), cfg, full_metrics=True)
-        val_m = evaluate(model, val_data.to(device), cfg, full_metrics=True)
+        train_m = evaluate(model, train_data.to(device), cfg, full_metrics=True, num_nodes=train_data.num_nodes)
+        val_m = evaluate(model, val_data.to(device), cfg, full_metrics=True, num_nodes=train_data.num_nodes)
         if val_m["auc"] > best_val_auc:
             best_val_auc = val_m["auc"]
-            best_test_metrics = evaluate(model, test_data.to(device), cfg, full_metrics=True)
+            best_test_metrics = evaluate(model, test_data.to(device), cfg, full_metrics=True, num_nodes=train_data.num_nodes)
         history.append({"epoch": epoch, "loss": total_loss,
                         "train": train_m, "val": val_m})
         if verbose and epoch % 5 == 0:
