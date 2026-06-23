@@ -1,4 +1,4 @@
-# PrimeKG Link Prediction — GCN vs GAT
+# PrimeKG Link Prediction - GCN vs GAT
 
 A GNN link-prediction project on the [PrimeKG](https://github.com/mims-harvard/PrimeKG)
 precision-medicine knowledge graph. Predicts missing edges (drug–disease indications,
