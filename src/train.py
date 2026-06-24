@@ -193,6 +193,100 @@ def evaluate_per_relation(model, data, num_nodes, edge_rel, cfg=cfg,
     return results
 
 
+@torch.no_grad()
+def evaluate_disease_focused(model, data, num_nodes, node_type_arr, cfg=cfg,
+                            threshold=None, num_neg_per_pos=100, seed=0,
+                            disease_type="disease"):
+    """Unified metrics computed ONLY on test edges that touch a disease node.
+
+    This measures the actual project goal (predicting disease-related links for
+    diagnosis), as opposed to the pooled metric which is dominated by non-disease
+    edges (e.g. protein-protein, drug-side-effect). An edge "touches a disease"
+    if either endpoint's node type is `disease_type`.
+
+    Classification (AUC, F1, etc.): restrict the test supervision set to edges
+    where at least one endpoint is a disease, keeping their original pos/neg
+    labels. Ranking (MRR, Hits@K): restrict to disease-touching POSITIVES and
+    corrupt the tail as usual.
+
+    Returns a metrics dict in the same shape as evaluate(full_metrics=True),
+    plus 'n_pos' / 'n_total' counts.
+    """
+    model.eval()
+    device = next(model.parameters()).device
+    thr = cfg.decision_threshold if threshold is None else threshold
+
+    is_disease = torch.tensor(
+        (np.asarray(node_type_arr) == disease_type), dtype=torch.bool
+    )
+
+    eidx = data.edge_label_index
+    elabel = data.edge_label
+    # An edge touches a disease if either endpoint is a disease node.
+    touches = is_disease[eidx[0].cpu()] | is_disease[eidx[1].cpu()]
+    touches = touches.to(elabel.device)
+    if int(touches.sum()) == 0:
+        return None
+
+    sub_idx = eidx[:, touches]
+    sub_true = elabel[touches].cpu().numpy()
+
+    # --- Classification metrics on disease-touching edges ---
+    out = model(data.x, data.edge_index, sub_idx)
+    prob = out.sigmoid().cpu().numpy()
+    metrics = {"threshold": thr,
+               "n_total": int(touches.sum()),
+               "n_pos": int((sub_true == 1).sum())}
+    # AUC/AP need both classes present.
+    if len(np.unique(sub_true)) > 1:
+        metrics["auc"] = float(roc_auc_score(sub_true, prob))
+        metrics["ap"] = float(average_precision_score(sub_true, prob))
+    else:
+        metrics["auc"] = float("nan")
+        metrics["ap"] = float("nan")
+    pred_label = (prob >= thr).astype(int)
+    metrics["accuracy"] = float(accuracy_score(sub_true, pred_label))
+    metrics["precision"] = float(precision_score(sub_true, pred_label, zero_division=0))
+    metrics["recall"] = float(recall_score(sub_true, pred_label, zero_division=0))
+    metrics["f1"] = float(f1_score(sub_true, pred_label, zero_division=0))
+
+    # --- Ranking metrics on disease-touching positives ---
+    pos_mask = elabel == 1
+    pos_touch = pos_mask & touches
+    pos_edges = eidx[:, pos_touch]
+    P = pos_edges.shape[1]
+    if P == 0:
+        metrics["mrr"] = float("nan")
+        for k in cfg.hits_k:
+            metrics[f"hits@{k}"] = float("nan")
+        return metrics
+
+    z = model.encode(data.x, data.edge_index)
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    src = pos_edges[0]
+    dst = pos_edges[1]
+    pos_scores = (z[src] * z[dst]).sum(dim=-1)
+    ranks = torch.empty(P, dtype=torch.long)
+    batch = getattr(cfg, "rank_eval_batch", 2048)
+    for start in range(0, P, batch):
+        end = min(start + batch, P)
+        b_src = src[start:end]
+        b_pos = pos_scores[start:end]
+        neg_dst = torch.randint(
+            0, num_nodes, (end - start, num_neg_per_pos), generator=g
+        ).to(device)
+        z_src = z[b_src].unsqueeze(1)
+        z_negd = z[neg_dst]
+        neg_scores = (z_src * z_negd).sum(dim=-1)
+        greater = (neg_scores >= b_pos.unsqueeze(1)).sum(dim=1)
+        ranks[start:end] = (greater + 1).cpu()
+    ranks = ranks.numpy()
+    metrics["mrr"] = float(np.mean(1.0 / ranks))
+    for k in cfg.hits_k:
+        metrics[f"hits@{k}"] = float(np.mean(ranks <= k))
+    return metrics
+
+
 def _best_f1_threshold(prob, true, num_steps=101):
     """Find the threshold in [0,1] that maximizes F1 on (prob, true).
     Returns (best_threshold, best_f1)."""
@@ -240,12 +334,16 @@ def evaluate(model, data, cfg=cfg, full_metrics=False, num_nodes=None, threshold
 
 
 def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=True,
-                   meta_edge_rel=None):
+                   meta_edge_rel=None, meta_node_types=None):
     """Train one model end-to-end; return best val/test metrics and history.
 
     meta_edge_rel: optional {(src,dst): relation} dict (from meta['edge_rel']).
     When provided and cfg.per_relation_eval is True, a per-relation breakdown of
     the final model is computed once and returned under key 'per_relation'.
+
+    meta_node_types: optional node-type array (from meta['node_type_arr']).
+    When provided and cfg.disease_focused_eval is True, a disease-focused unified
+    metric (only edges touching a disease node) is returned under 'disease_focused'.
     """
     device = get_device()
     torch.manual_seed(cfg.seed)
@@ -327,11 +425,19 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
         per_relation = evaluate_per_relation(model, te, N, meta_edge_rel, cfg,
                                              threshold=thr)
 
+    # Disease-focused unified metric (only edges touching a disease node).
+    disease_focused = None
+    if getattr(cfg, "disease_focused_eval", False) and meta_node_types is not None:
+        thr = (best_test_metrics or {}).get("threshold", cfg.decision_threshold)
+        disease_focused = evaluate_disease_focused(model, te, N, meta_node_types,
+                                                   cfg, threshold=thr)
+
     return {
         "conv_type": conv_type,
         "best_val_auc": best_val_auc,
         "test_metrics": best_test_metrics,
         "per_relation": per_relation,
+        "disease_focused": disease_focused,
         "history": history,
     }
 

@@ -31,6 +31,8 @@ def parse_args():
                    help="use 2-hop hard negatives for training")
     p.add_argument("--per-relation", action="store_true",
                    help="break down final test metrics by relation type")
+    p.add_argument("--disease-focused", action="store_true",
+                   help="also report unified metrics on disease-touching edges only")
     p.add_argument("--no-plot", action="store_true")
     return p.parse_args()
 
@@ -48,6 +50,8 @@ def main():
         cfg.hard_negatives = True
     if args.per_relation:
         cfg.per_relation_eval = True
+    if args.disease_focused:
+        cfg.disease_focused_eval = True
 
     print("Device:", get_device())
     print("Loading + building subgraph...")
@@ -67,12 +71,14 @@ def main():
 
     results = {}
     edge_rel = meta.get("edge_rel")
+    node_types = meta.get("node_type_arr")
     for conv in cfg.models:
         if cfg.use_neighbor_loader:
             results[conv] = run_experiment_sampled(conv, train_data, val_data, test_data, cfg)
         else:
             results[conv] = run_experiment(conv, train_data, val_data, test_data, cfg,
-                                           meta_edge_rel=edge_rel)
+                                           meta_edge_rel=edge_rel,
+                                           meta_node_types=node_types)
 
     # --- Comparison table (final test metrics) ---
     ks = cfg.hits_k
@@ -86,7 +92,22 @@ def main():
                 m["auc"], m["ap"], m["mrr"]] + [m[f"hits@{k}"] for k in ks]
         print(f"{name.upper():<7}" + "".join(f"{v:>8.4f}" for v in vals))
 
-    # --- Per-relation breakdown (if computed) ---
+    # --- Disease-focused unified table (if computed) ---
+    if cfg.disease_focused_eval and any(r.get("disease_focused") for r in results.values()):
+        any_df = next(r["disease_focused"] for r in results.values() if r.get("disease_focused"))
+        print("\n\nDisease-focused metrics (test edges touching a disease node only)")
+        print(f"This targets the project goal directly. "
+              f"({any_df['n_pos']:,} positive disease edges of "
+              f"{any_df['n_total']:,} total disease-touching edges)")
+        print("\n" + header)
+        print("-" * len(header))
+        for name, r in results.items():
+            m = r.get("disease_focused")
+            if not m:
+                continue
+            vals = [m["accuracy"], m["precision"], m["recall"], m["f1"],
+                    m["auc"], m["ap"], m["mrr"]] + [m[f"hits@{k}"] for k in ks]
+            print(f"{name.upper():<7}" + "".join(f"{v:>8.4f}" for v in vals))
     if cfg.per_relation_eval and any(r.get("per_relation") for r in results.values()):
         print("\n\nPer-relation breakdown (final model, test set)")
         print("Classification metrics (AUC, F1) show where GCN's separation")
