@@ -29,6 +29,8 @@ def parse_args():
                    help="node feature mode (overrides config)")
     p.add_argument("--hard-negatives", action="store_true",
                    help="use 2-hop hard negatives for training")
+    p.add_argument("--per-relation", action="store_true",
+                   help="break down final test metrics by relation type")
     p.add_argument("--no-plot", action="store_true")
     return p.parse_args()
 
@@ -44,6 +46,8 @@ def main():
         cfg.feature_mode = args.features
     if args.hard_negatives:
         cfg.hard_negatives = True
+    if args.per_relation:
+        cfg.per_relation_eval = True
 
     print("Device:", get_device())
     print("Loading + building subgraph...")
@@ -62,11 +66,13 @@ def main():
     print()
 
     results = {}
+    edge_rel = meta.get("edge_rel")
     for conv in cfg.models:
         if cfg.use_neighbor_loader:
             results[conv] = run_experiment_sampled(conv, train_data, val_data, test_data, cfg)
         else:
-            results[conv] = run_experiment(conv, train_data, val_data, test_data, cfg)
+            results[conv] = run_experiment(conv, train_data, val_data, test_data, cfg,
+                                           meta_edge_rel=edge_rel)
 
     # --- Comparison table (final test metrics) ---
     ks = cfg.hits_k
@@ -79,6 +85,31 @@ def main():
         vals = [m["accuracy"], m["precision"], m["recall"], m["f1"],
                 m["auc"], m["ap"], m["mrr"]] + [m[f"hits@{k}"] for k in ks]
         print(f"{name.upper():<7}" + "".join(f"{v:>8.4f}" for v in vals))
+
+    # --- Per-relation breakdown (if computed) ---
+    if cfg.per_relation_eval and any(r.get("per_relation") for r in results.values()):
+        print("\n\nPer-relation breakdown (final model, test set)")
+        print("Shows whether the GCN/GAT gap differs across relation types.")
+        # Union of all relations across models, ordered by edge count (desc).
+        rel_counts = {}
+        for r in results.values():
+            for rel, m in (r.get("per_relation") or {}).items():
+                rel_counts[rel] = max(rel_counts.get(rel, 0), m["n"])
+        rels_sorted = sorted(rel_counts, key=lambda x: -rel_counts[x])
+        rank_cols = ["MRR"] + [f"H@{k}" for k in ks]
+        for metric_key, metric_lbl in zip(["mrr"] + [f"hits@{k}" for k in ks], rank_cols):
+            print(f"\n  [{metric_lbl}]")
+            mdl_hdr = "".join(f"{n.upper():>10}" for n in results)
+            print(f"  {'relation':<22}{'n':>8}{mdl_hdr}")
+            print("  " + "-" * (22 + 8 + 10 * len(results)))
+            for rel in rels_sorted:
+                n = rel_counts[rel]
+                cells = ""
+                for r in results.values():
+                    pr = r.get("per_relation") or {}
+                    cells += f"{pr[rel][metric_key]:>10.4f}" if rel in pr else f"{'-':>10}"
+                rel_disp = rel if len(rel) <= 21 else rel[:20] + "…"
+                print(f"  {rel_disp:<22}{n:>8,}{cells}")
 
     # --- Plots ---
     if not args.no_plot:

@@ -244,6 +244,16 @@ def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
     meta = {"id2idx": id2idx, "node_type_arr": node_type_arr,
             "num_nodes": num_nodes, "feature_dim": x.shape[1]}
 
+    # Build an undirected (src_idx, dst_idx) -> relation lookup so evaluation can
+    # break metrics down by relation type. RandomLinkSplit shuffles edges, so we
+    # recover each test positive's relation by looking up its endpoint pair here.
+    rel_arr = sub["display_relation"].to_numpy()
+    edge_rel = {}
+    for s, d, r in zip(src, dst, rel_arr):
+        edge_rel[(int(s), int(d))] = r
+        edge_rel[(int(d), int(s))] = r
+    meta["edge_rel"] = edge_rel
+
     if cfg.hard_negatives:
         train_data = apply_hard_negatives(
             train_data, num_nodes, train_data.edge_index, cfg

@@ -85,6 +85,79 @@ def evaluate_ranking(model, data, num_nodes, cfg=cfg, num_neg_per_pos=100, seed=
     return metrics
 
 
+@torch.no_grad()
+def evaluate_per_relation(model, data, num_nodes, edge_rel, cfg=cfg,
+                          num_neg_per_pos=100, seed=0, min_edges=None):
+    """Break down test metrics by relation type (answers: is GAT better for some
+    relation types than others?).
+
+    For each POSITIVE test edge we look up its relation via `edge_rel`
+    {(src,dst): relation}, group positives by relation, and compute
+    per-query ranking metrics (MRR, Hits@K) within each group. Relations with
+    fewer than `min_edges` positives are grouped into '(other)' to keep numbers
+    stable. Returns {relation: {metric: value, 'n': count}}.
+
+    This runs ONCE on the final model, not per-epoch.
+    """
+    if min_edges is None:
+        min_edges = getattr(cfg, "per_relation_min_edges", 50)
+    model.eval()
+    device = next(model.parameters()).device
+
+    elabel = data.edge_label
+    eidx = data.edge_label_index
+    pos_mask = elabel == 1
+    pos_edges = eidx[:, pos_mask]                      # [2, P]
+    P = pos_edges.shape[1]
+    if P == 0:
+        return {}
+
+    # Look up the relation of each positive edge by its (src, dst) pair.
+    src_np = pos_edges[0].cpu().numpy()
+    dst_np = pos_edges[1].cpu().numpy()
+    rels = np.array([edge_rel.get((int(s), int(d)), "(unknown)")
+                     for s, d in zip(src_np, dst_np)])
+
+    # Group small relations into '(other)'.
+    uniq, counts = np.unique(rels, return_counts=True)
+    keep = {r for r, c in zip(uniq, counts) if c >= min_edges}
+    rels = np.array([r if r in keep else "(other)" for r in rels])
+
+    # Encode once; reuse for all groups.
+    z = model.encode(data.x, data.edge_index)
+    src_all = pos_edges[0]
+    dst_all = pos_edges[1]
+    pos_scores_all = (z[src_all] * z[dst_all]).sum(dim=-1)   # [P]
+    g = torch.Generator(device="cpu").manual_seed(seed)
+
+    results = {}
+    for rel in sorted(set(rels)):
+        idx = np.where(rels == rel)[0]
+        n = len(idx)
+        idx_t = torch.tensor(idx, dtype=torch.long)
+        b_src = src_all[idx_t]
+        b_pos = pos_scores_all[idx_t]
+        # Per-query ranking within this relation group, batched.
+        ranks = torch.empty(n, dtype=torch.long)
+        batch = getattr(cfg, "rank_eval_batch", 2048)
+        for start in range(0, n, batch):
+            end = min(start + batch, n)
+            neg_dst = torch.randint(
+                0, num_nodes, (end - start, num_neg_per_pos), generator=g
+            ).to(device)
+            z_src = z[b_src[start:end]].unsqueeze(1)
+            z_negd = z[neg_dst]
+            neg_scores = (z_src * z_negd).sum(dim=-1)
+            greater = (neg_scores >= b_pos[start:end].unsqueeze(1)).sum(dim=1)
+            ranks[start:end] = (greater + 1).cpu()
+        ranks = ranks.numpy()
+        m = {"n": int(n), "mrr": float(np.mean(1.0 / ranks))}
+        for k in cfg.hits_k:
+            m[f"hits@{k}"] = float(np.mean(ranks <= k))
+        results[rel] = m
+    return results
+
+
 def _best_f1_threshold(prob, true, num_steps=101):
     """Find the threshold in [0,1] that maximizes F1 on (prob, true).
     Returns (best_threshold, best_f1)."""
@@ -131,13 +204,19 @@ def evaluate(model, data, cfg=cfg, full_metrics=False, num_nodes=None, threshold
     return metrics
 
 
-def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=True):
-    """Train one model end-to-end; return best val/test metrics and history."""
+def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=True,
+                   meta_edge_rel=None):
+    """Train one model end-to-end; return best val/test metrics and history.
+
+    meta_edge_rel: optional {(src,dst): relation} dict (from meta['edge_rel']).
+    When provided and cfg.per_relation_eval is True, a per-relation breakdown of
+    the final model is computed once and returned under key 'per_relation'.
+    """
     device = get_device()
     torch.manual_seed(cfg.seed)
 
     model = GNNLinkPredictor(
-        cfg.feature_dim, cfg.hidden_dim, cfg.out_dim,
+        train_data.x.shape[1], cfg.hidden_dim, cfg.out_dim,
         conv_type=conv_type, heads=cfg.gat_heads, dropout=cfg.dropout,
     ).to(device)
     optimizer = torch.optim.Adam(
@@ -148,6 +227,7 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
     N = tr.num_nodes
 
     best_val_auc, best_test_metrics = 0.0, None
+    best_state = None
     history = []   # list of dicts: per-epoch train & val metrics
     epochs_without_improve = 0
     for epoch in range(1, cfg.epochs + 1):
@@ -168,6 +248,7 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
             best_t, _ = _best_f1_threshold(v_prob, v_true)
             best_test_metrics = evaluate(model, te, cfg, full_metrics=True,
                                          num_nodes=N, threshold=best_t)
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             epochs_without_improve = 0
         else:
             epochs_without_improve += 1
@@ -199,10 +280,21 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
               f"MRR {m['mrr']:.4f}  " +
               "  ".join(f"H@{k} {m[f'hits@{k}']:.3f}" for k in cfg.hits_k) + "\n")
 
+    # Restore the best-val model weights (not the last epoch's) before any
+    # post-hoc analysis like the per-relation breakdown.
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    # Per-relation breakdown on the final (best) model, computed once.
+    per_relation = None
+    if getattr(cfg, "per_relation_eval", False) and meta_edge_rel is not None:
+        per_relation = evaluate_per_relation(model, te, N, meta_edge_rel, cfg)
+
     return {
         "conv_type": conv_type,
         "best_val_auc": best_val_auc,
         "test_metrics": best_test_metrics,
+        "per_relation": per_relation,
         "history": history,
     }
 
@@ -221,7 +313,7 @@ def run_experiment_sampled(conv_type, train_data, val_data, test_data, cfg=cfg, 
     device = get_device()
     torch.manual_seed(cfg.seed)
     model = GNNLinkPredictor(
-        cfg.feature_dim, cfg.hidden_dim, cfg.out_dim,
+        train_data.x.shape[1], cfg.hidden_dim, cfg.out_dim,
         conv_type=conv_type, heads=cfg.gat_heads, dropout=cfg.dropout,
     ).to(device)
     optimizer = torch.optim.Adam(
