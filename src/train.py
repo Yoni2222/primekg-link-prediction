@@ -87,17 +87,26 @@ def evaluate_ranking(model, data, num_nodes, cfg=cfg, num_neg_per_pos=100, seed=
 
 @torch.no_grad()
 def evaluate_per_relation(model, data, num_nodes, edge_rel, cfg=cfg,
-                          num_neg_per_pos=100, seed=0, min_edges=None):
-    """Break down test metrics by relation type (answers: is GAT better for some
-    relation types than others?).
+                          num_neg_per_pos=100, seed=0, min_edges=None,
+                          threshold=0.5):
+    """Break down test metrics by relation type. This answers the supervisor's
+    question from BOTH sides:
+
+      - Ranking metrics (MRR, Hits@K): where does GAT's ranking advantage live?
+      - Classification metrics (AUC, F1): where does GCN's separation advantage
+        live? (This is the side that explains GCN's edge in the pooled AUC/F1.)
 
     For each POSITIVE test edge we look up its relation via `edge_rel`
-    {(src,dst): relation}, group positives by relation, and compute
-    per-query ranking metrics (MRR, Hits@K) within each group. Relations with
-    fewer than `min_edges` positives are grouped into '(other)' to keep numbers
-    stable. Returns {relation: {metric: value, 'n': count}}.
+    {(src,dst): relation} and group positives by relation. Within each group:
+      * ranking: corrupt the tail with `num_neg_per_pos` random nodes per positive
+      * classification: sample one negative tail per positive (a real non-edge),
+        then compute AUC and F1 over that balanced pos/neg set.
 
-    This runs ONCE on the final model, not per-epoch.
+    Relations with fewer than `min_edges` positives fold into '(other)'.
+    `threshold` is the decision threshold for F1 (pass the validation-chosen one
+    for consistency with the pooled metrics).
+
+    Runs ONCE on the final model, not per-epoch.
     """
     if min_edges is None:
         min_edges = getattr(cfg, "per_relation_min_edges", 50)
@@ -129,6 +138,7 @@ def evaluate_per_relation(model, data, num_nodes, edge_rel, cfg=cfg,
     dst_all = pos_edges[1]
     pos_scores_all = (z[src_all] * z[dst_all]).sum(dim=-1)   # [P]
     g = torch.Generator(device="cpu").manual_seed(seed)
+    batch = getattr(cfg, "rank_eval_batch", 2048)
 
     results = {}
     for rel in sorted(set(rels)):
@@ -136,10 +146,11 @@ def evaluate_per_relation(model, data, num_nodes, edge_rel, cfg=cfg,
         n = len(idx)
         idx_t = torch.tensor(idx, dtype=torch.long)
         b_src = src_all[idx_t]
+        b_dst = dst_all[idx_t]
         b_pos = pos_scores_all[idx_t]
-        # Per-query ranking within this relation group, batched.
+
+        # --- Ranking metrics (MRR, Hits@K) ---
         ranks = torch.empty(n, dtype=torch.long)
-        batch = getattr(cfg, "rank_eval_batch", 2048)
         for start in range(0, n, batch):
             end = min(start + batch, n)
             neg_dst = torch.randint(
@@ -154,6 +165,30 @@ def evaluate_per_relation(model, data, num_nodes, edge_rel, cfg=cfg,
         m = {"n": int(n), "mrr": float(np.mean(1.0 / ranks))}
         for k in cfg.hits_k:
             m[f"hits@{k}"] = float(np.mean(ranks <= k))
+
+        # --- Classification metrics (AUC, F1) ---
+        # One sampled negative tail per positive -> balanced set for this relation.
+        # Reject negatives that happen to be real edges (open-world safety).
+        neg_dst_single = torch.empty(n, dtype=torch.long)
+        for j in range(n):
+            u = int(b_src[j].item())
+            while True:
+                w = int(torch.randint(0, num_nodes, (1,), generator=g).item())
+                if w != u and (u, w) not in edge_rel:
+                    break
+            neg_dst_single[j] = w
+        neg_dst_single = neg_dst_single.to(device)
+        neg_scores_single = (z[b_src] * z[neg_dst_single]).sum(dim=-1)  # [n]
+
+        scores = torch.cat([b_pos, neg_scores_single]).sigmoid().cpu().numpy()
+        labels = np.concatenate([np.ones(n), np.zeros(n)])
+        try:
+            m["auc"] = float(roc_auc_score(labels, scores))
+        except ValueError:
+            m["auc"] = float("nan")
+        preds = (scores >= threshold).astype(int)
+        m["f1"] = float(f1_score(labels, preds, zero_division=0))
+
         results[rel] = m
     return results
 
@@ -288,7 +323,9 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
     # Per-relation breakdown on the final (best) model, computed once.
     per_relation = None
     if getattr(cfg, "per_relation_eval", False) and meta_edge_rel is not None:
-        per_relation = evaluate_per_relation(model, te, N, meta_edge_rel, cfg)
+        thr = (best_test_metrics or {}).get("threshold", cfg.decision_threshold)
+        per_relation = evaluate_per_relation(model, te, N, meta_edge_rel, cfg,
+                                             threshold=thr)
 
     return {
         "conv_type": conv_type,

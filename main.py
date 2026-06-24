@@ -89,15 +89,17 @@ def main():
     # --- Per-relation breakdown (if computed) ---
     if cfg.per_relation_eval and any(r.get("per_relation") for r in results.values()):
         print("\n\nPer-relation breakdown (final model, test set)")
-        print("Shows whether the GCN/GAT gap differs across relation types.")
+        print("Classification metrics (AUC, F1) show where GCN's separation")
+        print("advantage lives; ranking metrics (MRR, Hits@K) show GAT's.")
         # Union of all relations across models, ordered by edge count (desc).
         rel_counts = {}
         for r in results.values():
             for rel, m in (r.get("per_relation") or {}).items():
                 rel_counts[rel] = max(rel_counts.get(rel, 0), m["n"])
         rels_sorted = sorted(rel_counts, key=lambda x: -rel_counts[x])
-        rank_cols = ["MRR"] + [f"H@{k}" for k in ks]
-        for metric_key, metric_lbl in zip(["mrr"] + [f"hits@{k}" for k in ks], rank_cols):
+        metric_order = [("auc", "AUC"), ("f1", "F1"), ("mrr", "MRR")]
+        metric_order += [(f"hits@{k}", f"H@{k}") for k in ks]
+        for metric_key, metric_lbl in metric_order:
             print(f"\n  [{metric_lbl}]")
             mdl_hdr = "".join(f"{n.upper():>10}" for n in results)
             print(f"  {'relation':<22}{'n':>8}{mdl_hdr}")
@@ -107,7 +109,10 @@ def main():
                 cells = ""
                 for r in results.values():
                     pr = r.get("per_relation") or {}
-                    cells += f"{pr[rel][metric_key]:>10.4f}" if rel in pr else f"{'-':>10}"
+                    if rel in pr and metric_key in pr[rel]:
+                        cells += f"{pr[rel][metric_key]:>10.4f}"
+                    else:
+                        cells += f"{'-':>10}"
                 rel_disp = rel if len(rel) <= 21 else rel[:20] + "…"
                 print(f"  {rel_disp:<22}{n:>8,}{cells}")
 
