@@ -43,6 +43,7 @@ python main.py --models gcn gat sage    # add GraphSAGE
 python main.py --features text          # text-based node features (sentence-transformers)
 python main.py --hard-negatives         # 2-hop hard negatives for training
 python main.py --per-relation           # break down final test metrics by relation type
+python main.py --disease-focused        # also report metrics on disease-touching edges only
 python main.py --sampling               # NeighborLoader mini-batching
 python main.py --epochs 200 --lr 0.005  # override hyperparameters
 ```
@@ -67,12 +68,20 @@ python main.py --epochs 200 --lr 0.005  # override hyperparameters
   (nodes sharing a neighbor but with no edge). Val/test stay random for fair
   evaluation. Tends to improve MRR / Hits@K by forcing finer distinctions.
 - **`per_relation_eval`** — when True (or `--per-relation`), after training the
-  final model, breaks the test ranking metrics (MRR, Hits@K) down by relation
-  type. This answers whether the GCN/GAT gap differs across relation types (e.g.
-  GAT may win on some relations and lose on others, which a single pooled number
-  hides). Computed once on the final model — not per-epoch, so it adds almost no
-  runtime. Relations with fewer than `per_relation_min_edges` (default 50) test
-  positives are folded into an `(other)` group for stability.
+  final model, breaks the test metrics down by relation type. Reports both
+  classification metrics (AUC, F1) — which show where GCN's separation advantage
+  lives — and ranking metrics (MRR, Hits@K) — which show where GAT's ranking
+  advantage lives. This directly answers why the two models win on different
+  pooled metrics, since a single pooled number hides per-relation differences.
+  Computed once on the final model — not per-epoch, so it adds almost no runtime.
+  Relations with fewer than `per_relation_min_edges` (default 50) test positives
+  are folded into an `(other)` group for stability.
+- **`disease_focused_eval`** — when True (or `--disease-focused`), reports a second
+  unified metrics table computed only on test edges that touch a disease node
+  (either endpoint has node type `disease`). The pooled table is dominated by
+  non-disease edges (e.g. protein-protein, drug-side-effect), so this targets the
+  project's actual goal — predicting disease-related links — directly. Keep both:
+  the pooled table for literature comparison, the disease-focused one for the goal.
 
 ## Metrics
 
