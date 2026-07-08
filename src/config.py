@@ -32,11 +32,17 @@ class Config:
     seed: int = 42
 
     # How to initialize node features:
-    #   "random" - random vectors of size feature_dim (learns from structure only)
-    #   "text"   - sentence-transformer embeddings of each node's name
+    #   "random"   - random vectors of size feature_dim (learns from structure only)
+    #   "text"     - sentence-transformer embeddings of each node's name (384-dim)
+    #   "text_pca" - same text embeddings, reduced via PCA to text_pca_dim.
+    #                Isolates whether a dimensionality increase (vs. random's
+    #                feature_dim) explains GAT's drop with text features, by
+    #                matching text_pca_dim to feature_dim (64) for a clean
+    #                random-vs-text comparison at equal input width.
     feature_mode: str = "random"
     text_model: str = "all-MiniLM-L6-v2"   # sentence-transformer model (384-dim)
-    text_cache: str = "./data/node_text_emb.npy"  # cached embeddings
+    text_cache: str = "./data/node_text_emb.npy"  # cached embeddings (full 384-dim)
+    text_pca_dim: int = 64            # target dim for feature_mode == "text_pca"
 
     # --- Model ---
     hidden_dim: int = 64          # keep modest so GAT fits in T4 memory
@@ -78,6 +84,9 @@ class Config:
     hits_k: tuple = (10, 50)          # report Hits@10, Hits@50
     decision_threshold: float = 0.5   # for precision/recall/F1
     rank_eval_batch: int = 2048       # batch size for MRR/Hits ranking eval
+    per_relation_eval: bool = False   # break down final test metrics by relation type
+    per_relation_min_edges: int = 50  # relations with fewer test positives -> '(other)'
+    disease_focused_eval: bool = False  # also report unified metrics on disease-touching edges only
 
     # --- Which models to compare ---
     models: tuple = ("gcn", "gat")

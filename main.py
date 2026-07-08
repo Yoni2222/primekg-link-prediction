@@ -25,7 +25,7 @@ def parse_args():
     p.add_argument("--lr", type=float, default=cfg.lr)
     p.add_argument("--sampling", action="store_true",
                    help="use NeighborLoader mini-batching (for large graphs / GAT)")
-    p.add_argument("--features", choices=["random", "text"], default=None,
+    p.add_argument("--features", choices=["random", "text", "text_pca"], default=None,
                    help="node feature mode (overrides config)")
     p.add_argument("--hard-negatives", action="store_true",
                    help="use 2-hop hard negatives for training")
@@ -110,15 +110,15 @@ def main():
             print(f"{name.upper():<7}" + "".join(f"{v:>8.4f}" for v in vals))
     if cfg.per_relation_eval and any(r.get("per_relation") for r in results.values()):
         print("\n\nPer-relation breakdown (final model, test set)")
-        print("Classification metrics (AUC, F1) show where GCN's separation")
-        print("advantage lives; ranking metrics (MRR, Hits@K) show GAT's.")
+        print("Classification metrics (AUC, F1, Accuracy) show where GCN's")
+        print("separation advantage lives; ranking metrics (MRR, Hits@K) show GAT's.")
         # Union of all relations across models, ordered by edge count (desc).
         rel_counts = {}
         for r in results.values():
             for rel, m in (r.get("per_relation") or {}).items():
                 rel_counts[rel] = max(rel_counts.get(rel, 0), m["n"])
         rels_sorted = sorted(rel_counts, key=lambda x: -rel_counts[x])
-        metric_order = [("auc", "AUC"), ("f1", "F1"), ("mrr", "MRR")]
+        metric_order = [("auc", "AUC"), ("accuracy", "Accuracy"), ("f1", "F1"), ("mrr", "MRR")]
         metric_order += [(f"hits@{k}", f"H@{k}") for k in ks]
         for metric_key, metric_lbl in metric_order:
             print(f"\n  [{metric_lbl}]")
