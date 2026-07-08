@@ -71,8 +71,15 @@ def _node_name_map(sub: pd.DataFrame) -> dict:
 def build_node_features(all_ids, sub, cfg=cfg):
     """Return a [num_nodes, D] feature tensor according to cfg.feature_mode.
 
-    "random": random vectors of size cfg.feature_dim.
-    "text":   sentence-transformer embeddings of each node's name (cached).
+    "random":   random vectors of size cfg.feature_dim.
+    "text":     sentence-transformer embeddings of each node's name (cached),
+                full dimension (384 for the default model).
+    "text_pca": same text embeddings, then reduced with PCA to
+                cfg.text_pca_dim dimensions. Lets us isolate whether GAT's
+                drop with text features is about dimensionality (too many
+                input params relative to GCN) or about the embeddings
+                themselves — same semantic info, matched to the random
+                baseline's dimension.
     """
     num_nodes = len(all_ids)
 
@@ -80,33 +87,49 @@ def build_node_features(all_ids, sub, cfg=cfg):
         torch.manual_seed(cfg.seed)
         return torch.randn(num_nodes, cfg.feature_dim)
 
-    if cfg.feature_mode == "text":
+    if cfg.feature_mode in ("text", "text_pca"):
         import os
         # Use cache if present and matches the node count.
         if os.path.exists(cfg.text_cache):
             cached = np.load(cfg.text_cache)
             if cached.shape[0] == num_nodes:
                 print(f"Loaded cached text embeddings {cached.shape}")
-                return torch.tensor(cached, dtype=torch.float)
-            print("Cache size mismatch; recomputing text embeddings.")
+                emb = cached
+            else:
+                print("Cache size mismatch; recomputing text embeddings.")
+                emb = None
+        else:
+            emb = None
 
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError:
-            raise SystemExit(
-                "feature_mode='text' needs sentence-transformers:\n"
-                "  pip install sentence-transformers"
-            )
+        if emb is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError:
+                raise SystemExit(
+                    "feature_mode='text'/'text_pca' needs sentence-transformers:\n"
+                    "  pip install sentence-transformers"
+                )
+            name_map = _node_name_map(sub)
+            names = [str(name_map.get(nid, "")) for nid in all_ids]
+            print(f"Encoding {len(names)} node names with {cfg.text_model} ...")
+            model = SentenceTransformer(cfg.text_model)
+            emb = model.encode(names, batch_size=256, show_progress_bar=True,
+                               convert_to_numpy=True)
+            np.save(cfg.text_cache, emb)
+            print(f"Saved text embeddings to {cfg.text_cache} {emb.shape}")
 
-        name_map = _node_name_map(sub)
-        names = [str(name_map.get(nid, "")) for nid in all_ids]
-        print(f"Encoding {len(names)} node names with {cfg.text_model} ...")
-        model = SentenceTransformer(cfg.text_model)
-        emb = model.encode(names, batch_size=256, show_progress_bar=True,
-                           convert_to_numpy=True)
-        np.save(cfg.text_cache, emb)
-        print(f"Saved text embeddings to {cfg.text_cache} {emb.shape}")
-        return torch.tensor(emb, dtype=torch.float)
+        if cfg.feature_mode == "text":
+            return torch.tensor(emb, dtype=torch.float)
+
+        # --- text_pca: reduce the SAME embeddings to cfg.text_pca_dim ---
+        from sklearn.decomposition import PCA
+        target_dim = cfg.text_pca_dim
+        pca = PCA(n_components=target_dim, random_state=cfg.seed)
+        reduced = pca.fit_transform(emb)
+        explained = pca.explained_variance_ratio_.sum()
+        print(f"PCA: {emb.shape[1]} -> {target_dim} dims "
+              f"({explained:.1%} variance retained)")
+        return torch.tensor(reduced, dtype=torch.float)
 
     raise ValueError(f"Unknown feature_mode: {cfg.feature_mode}")
 

@@ -100,7 +100,8 @@ def evaluate_per_relation(model, data, num_nodes, edge_rel, cfg=cfg,
     {(src,dst): relation} and group positives by relation. Within each group:
       * ranking: corrupt the tail with `num_neg_per_pos` random nodes per positive
       * classification: sample one negative tail per positive (a real non-edge),
-        then compute AUC and F1 over that balanced pos/neg set.
+        then compute AUC, F1, accuracy, precision, and recall over that balanced
+        pos/neg set.
 
     Relations with fewer than `min_edges` positives fold into '(other)'.
     `threshold` is the decision threshold for F1 (pass the validation-chosen one
@@ -166,7 +167,7 @@ def evaluate_per_relation(model, data, num_nodes, edge_rel, cfg=cfg,
         for k in cfg.hits_k:
             m[f"hits@{k}"] = float(np.mean(ranks <= k))
 
-        # --- Classification metrics (AUC, F1) ---
+        # --- Classification metrics (AUC, Accuracy, Precision, Recall, F1) ---
         # One sampled negative tail per positive -> balanced set for this relation.
         # Reject negatives that happen to be real edges (open-world safety).
         neg_dst_single = torch.empty(n, dtype=torch.long)
@@ -188,6 +189,9 @@ def evaluate_per_relation(model, data, num_nodes, edge_rel, cfg=cfg,
             m["auc"] = float("nan")
         preds = (scores >= threshold).astype(int)
         m["f1"] = float(f1_score(labels, preds, zero_division=0))
+        m["accuracy"] = float(accuracy_score(labels, preds))
+        m["precision"] = float(precision_score(labels, preds, zero_division=0))
+        m["recall"] = float(recall_score(labels, preds, zero_division=0))
 
         results[rel] = m
     return results
