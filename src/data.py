@@ -68,6 +68,73 @@ def _node_name_map(sub: pd.DataFrame) -> dict:
     return names.set_index("id")["name"].to_dict()
 
 
+def _build_rich_features(all_ids, sub, cfg=cfg):
+    """Sentence embeddings of PrimeKG's per-node attribute text.
+
+    Only disease and drug nodes have attribute text in PrimeKG. Every other
+    node type falls back to its name, exactly as feature_mode='text' does, so
+    'rich' vs 'text' is a clean one-variable ablation: same encoder, same
+    fallback, the only change is that ~25k of the nodes get a real description
+    instead of a bare name.
+
+    A final binary column marks which nodes actually got rich text. Without it
+    the model cannot tell an uninformative embedding from an informative one,
+    and the gene/protein majority would dilute whatever signal the drug and
+    disease descriptions carry.
+    """
+    from .node_features import build_text_map
+
+    num_nodes = len(all_ids)
+    if os.path.exists(cfg.rich_cache):
+        cached = np.load(cfg.rich_cache)
+        if cached.shape[0] == num_nodes:
+            print(f"Loaded cached rich embeddings {cached.shape}")
+            return torch.tensor(cached, dtype=torch.float)
+        print("Rich cache size mismatch; recomputing.")
+
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        raise SystemExit(
+            "feature_mode='rich' needs sentence-transformers:\n"
+            "  pip install sentence-transformers"
+        )
+
+    text_map = build_text_map(
+        sub, cfg.data_dir,
+        risky_disease=list(cfg.rich_risky_disease_cols),
+        risky_drug=list(cfg.rich_risky_drug_cols),
+    )
+    name_map = _node_name_map(sub)
+
+    texts, has_rich = [], []
+    for nid in all_ids:
+        rich = text_map.get(nid)
+        if rich:
+            texts.append(rich)
+            has_rich.append(1.0)
+        else:
+            texts.append(str(name_map.get(nid, "")))
+            has_rich.append(0.0)
+
+    n_rich = int(sum(has_rich))
+    print(f"Rich text covers {n_rich:,} / {num_nodes:,} nodes "
+          f"({100 * n_rich / num_nodes:.1f}%); the rest fall back to node name")
+
+    print(f"Encoding {len(texts):,} node texts with {cfg.text_model} ...")
+    model = SentenceTransformer(cfg.text_model)
+    emb = model.encode(texts, batch_size=128, show_progress_bar=True,
+                       convert_to_numpy=True)
+
+    if cfg.rich_feature_flag:
+        emb = np.hstack([emb, np.array(has_rich, dtype=emb.dtype)[:, None]])
+
+    os.makedirs(os.path.dirname(cfg.rich_cache) or ".", exist_ok=True)
+    np.save(cfg.rich_cache, emb)
+    print(f"Saved rich embeddings to {cfg.rich_cache} {emb.shape}")
+    return torch.tensor(emb, dtype=torch.float)
+
+
 def build_node_features(all_ids, sub, cfg=cfg):
     """Return a [num_nodes, D] feature tensor according to cfg.feature_mode.
 
@@ -86,6 +153,9 @@ def build_node_features(all_ids, sub, cfg=cfg):
     if cfg.feature_mode == "random":
         torch.manual_seed(cfg.seed)
         return torch.randn(num_nodes, cfg.feature_dim)
+
+    if cfg.feature_mode == "rich":
+        return _build_rich_features(all_ids, sub, cfg)
 
     if cfg.feature_mode in ("text", "text_pca"):
         import os

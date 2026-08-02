@@ -39,10 +39,28 @@ class Config:
     #                feature_dim) explains GAT's drop with text features, by
     #                matching text_pca_dim to feature_dim (64) for a clean
     #                random-vs-text comparison at equal input width.
+    #   "rich"     - sentence-transformer embeddings of PrimeKG's per-node
+    #                attribute text (disease_features.tab / drug_features.tab),
+    #                with a fallback to the node name for the node types that
+    #                have no attribute file. Requires both .tab files in
+    #                data_dir. See src/node_features.py for which columns are
+    #                used and which are excluded as label leakage.
     feature_mode: str = "random"
     text_model: str = "all-MiniLM-L6-v2"   # sentence-transformer model (384-dim)
     text_cache: str = "./data/node_text_emb.npy"  # cached embeddings (full 384-dim)
     text_pca_dim: int = 64            # target dim for feature_mode == "text_pca"
+
+    # --- Rich (attribute-text) features ---
+    rich_cache: str = "./data/node_rich_emb.npy"
+    # Append a 0/1 column marking nodes that actually got attribute text, so the
+    # model can distinguish a real description from a name-only fallback.
+    rich_feature_flag: bool = True
+    # Columns deliberately re-enabled for a leakage ablation. Leave empty for
+    # the honest run. See RISKY_DISEASE_COLS / RISKY_DRUG_COLS in
+    # src/node_features.py, and drop the matching relation from
+    # target_relations before using them.
+    rich_risky_disease_cols: tuple = ()
+    rich_risky_drug_cols: tuple = ()
 
     # --- Model ---
     hidden_dim: int = 64          # keep modest so GAT fits in T4 memory

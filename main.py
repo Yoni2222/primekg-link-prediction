@@ -25,8 +25,8 @@ def parse_args():
     p.add_argument("--lr", type=float, default=cfg.lr)
     p.add_argument("--sampling", action="store_true",
                    help="use NeighborLoader mini-batching (for large graphs / GAT)")
-    p.add_argument("--features", choices=["random", "text", "text_pca"], default=None,
-                   help="node feature mode (overrides config)")
+    p.add_argument("--features", choices=["random", "text", "text_pca", "rich"],
+                   default=None, help="node feature mode (overrides config)")
     p.add_argument("--hard-negatives", action="store_true",
                    help="use 2-hop hard negatives for training")
     p.add_argument("--per-relation", action="store_true",
