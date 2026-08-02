@@ -16,6 +16,8 @@ import os
 from src.config import cfg
 from src.data import load_primekg, build_subgraph, to_pyg_splits
 from src.train import run_experiment, run_experiment_sampled, get_device
+from src.results import (evaluate_by_degree, print_degree_table, log_run,
+                         show_ablation)
 
 
 def parse_args():
@@ -34,11 +36,20 @@ def parse_args():
     p.add_argument("--disease-focused", action="store_true",
                    help="also report unified metrics on disease-touching edges only")
     p.add_argument("--no-plot", action="store_true")
+    p.add_argument("--by-degree", action="store_true",
+                   help="break ranking metrics down by source-node degree")
+    p.add_argument("--no-log", action="store_true",
+                   help="skip appending this run to results/runs.csv")
+    p.add_argument("--show-ablation", action="store_true",
+                   help="print every run logged so far, then exit")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.show_ablation:
+        show_ablation(cfg)
+        return
     cfg.models = tuple(args.models)
     cfg.epochs = args.epochs
     cfg.lr = args.lr
@@ -137,6 +148,27 @@ def main():
                 rel_disp = rel if len(rel) <= 21 else rel[:20] + "…"
                 print(f"  {rel_disp:<22}{n:>8,}{cells}")
 
+    # --- Ranking by node degree ---
+    degree = None
+    if args.by_degree:
+        degree = {}
+        for name, r in results.items():
+            if r.get("_model") is None:
+                continue
+            degree[name] = evaluate_by_degree(
+                r["_model"], r["_test_data"], r["_num_nodes"], cfg)
+        print_degree_table(degree, cfg)
+
+    # --- Persist ---
+    if not args.no_log:
+        log_run(results, cfg, degree=degree)
+
+    # Drop the tensors now that analysis is done, so nothing downstream
+    # accidentally holds the graph in memory or tries to serialise it.
+    for r in results.values():
+        for k in ("_model", "_test_data", "_num_nodes"):
+            r.pop(k, None)
+
     # --- Plots ---
     if not args.no_plot:
         try:
@@ -155,7 +187,8 @@ def main():
             plt.xlabel("Epoch"); plt.ylabel("Validation AUC")
             plt.title("Validation AUC — GCN vs GAT")
             plt.legend(); plt.grid(alpha=0.3)
-            p1 = os.path.join(cfg.out_dir, "val_auc_curves.png")
+            tag = cfg.feature_mode + ("_hardneg" if cfg.hard_negatives else "")
+            p1 = os.path.join(cfg.out_dir, f"val_auc_curves_{tag}.png")
             plt.savefig(p1, dpi=150, bbox_inches="tight"); plt.close(); saved.append(p1)
 
             # Figure 2: train vs val curves per model (loss, accuracy, F1)
@@ -169,7 +202,7 @@ def main():
                     axi.plot(ep, [h["val"][metric] for h in r["history"]], label="val")
                     axi.set_title(title); axi.set_xlabel("Epoch"); axi.legend(); axi.grid(alpha=0.3)
                 fig.suptitle(f"{name.upper()} — train vs validation")
-                p = os.path.join(cfg.out_dir, f"train_val_{name}.png")
+                p = os.path.join(cfg.out_dir, f"train_val_{name}_{tag}.png")
                 fig.savefig(p, dpi=150, bbox_inches="tight"); plt.close(fig); saved.append(p)
 
             # Figure 3: final-metrics bar chart (GCN vs GAT)
@@ -185,7 +218,7 @@ def main():
             plt.ylabel("Score"); plt.ylim(0, 1)
             plt.title("Final test metrics — GCN vs GAT")
             plt.legend(); plt.grid(alpha=0.3, axis="y")
-            p3 = os.path.join(cfg.out_dir, "final_metrics_bar.png")
+            p3 = os.path.join(cfg.out_dir, f"final_metrics_bar_{tag}.png")
             plt.savefig(p3, dpi=150, bbox_inches="tight"); plt.close(); saved.append(p3)
 
             print("\nPlots saved:")

@@ -443,6 +443,11 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
         "per_relation": per_relation,
         "disease_focused": disease_focused,
         "history": history,
+        # Exposed so main.py can run degree-bucketed evaluation without
+        # retraining. Stripped before anything is serialised to JSON.
+        "_model": model,
+        "_test_data": te,
+        "_num_nodes": N,
     }
 
 
