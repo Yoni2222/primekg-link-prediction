@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import torch
 
 from src.config import cfg
-from src.data import load_primekg, build_subgraph, to_pyg_splits
+from src.data import (load_primekg, build_subgraph, to_pyg_splits,
+                      seed_everything)
 from src.train import run_experiment, run_experiment_sampled, get_device
 from src.results import (evaluate_by_degree, print_degree_table, log_run,
-                         show_ablation)
+                         show_ablation, summarize_seeds, save_checkpoints)
 
 
 def parse_args():
@@ -37,41 +39,40 @@ def parse_args():
                    help="also report unified metrics on disease-touching edges only")
     p.add_argument("--no-plot", action="store_true")
     p.add_argument("--by-degree", action="store_true",
-                   help="break ranking metrics down by source-node degree")
+                   help="(now on by default; kept so old commands still work)")
+    p.add_argument("--no-analysis", action="store_true",
+                   help="skip per-relation and per-degree breakdowns")
     p.add_argument("--no-log", action="store_true",
                    help="skip appending this run to results/runs.csv")
     p.add_argument("--show-ablation", action="store_true",
                    help="print every run logged so far, then exit")
+    p.add_argument("--seed", type=int, default=None,
+                   help="override cfg.seed; controls the split, negatives and init")
+    p.add_argument("--save-model", action="store_true",
+                   help="(now on by default; kept so old commands still work)")
+    p.add_argument("--no-save-model", action="store_true",
+                   help="do not write .pt checkpoints")
+    p.add_argument("--save-all-models", action="store_true",
+                   help="keep a checkpoint per seed instead of only the best")
+    p.add_argument("--seeds", type=int, nargs="+", default=None,
+                   help="run several seeds in one go, e.g. --seeds 1 2 3; "
+                        "prints mean/std and a per-degree consistency check")
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
-    if args.show_ablation:
-        show_ablation(cfg)
-        return
-    cfg.models = tuple(args.models)
-    cfg.epochs = args.epochs
-    cfg.lr = args.lr
-    if args.sampling:
-        cfg.use_neighbor_loader = True
-    if args.features:
-        cfg.feature_mode = args.features
-    if args.hard_negatives:
-        cfg.hard_negatives = True
-    if args.per_relation:
-        cfg.per_relation_eval = True
-    if args.disease_focused:
-        cfg.disease_focused_eval = True
+def run_one_seed(args, sub, seed, make_plots=True):
+    """One full train/evaluate/log cycle at a fixed seed.
 
-    print("Device:", get_device())
-    print("Loading + building subgraph...")
-    kg = load_primekg(cfg.data_dir)
-    sub = build_subgraph(kg, cfg.keep_types, cfg.drop_relations)
-    if len(sub) == 0:
-        raise SystemExit(
-            "Subgraph is empty. Run `python explore.py` and fix cfg.keep_types."
-        )
+    The subgraph is passed in because it does not depend on the seed -- only
+    the split, the negatives and the weight init do. Reloading kg.csv per seed
+    would cost minutes and change nothing.
+    """
+    cfg.seed = seed
+    # Must run before to_pyg_splits: RandomLinkSplit takes no seed argument and
+    # draws from torch's global RNG, so seeding afterwards leaves the split
+    # itself unreproducible.
+    seed_everything(seed)
+    print(f"\n{'=' * 60}\nSEED {seed}\n{'=' * 60}")
 
     train_data, val_data, test_data, meta = to_pyg_splits(sub, cfg)
     print(f"Graph: {meta['num_nodes']:,} nodes, "
@@ -149,8 +150,11 @@ def main():
                 print(f"  {rel_disp:<22}{n:>8,}{cells}")
 
     # --- Ranking by node degree ---
+    # On by default: it reuses the already-trained model and costs seconds
+    # against aning run that costs minutes. Gating it behind a flag meant forgetting
+    # it once made a run non-comparable with the others, which already happened.
     degree = None
-    if args.by_degree:
+    if not args.no_analysis:
         degree = {}
         for name, r in results.items():
             if r.get("_model") is None:
@@ -163,6 +167,11 @@ def main():
     if not args.no_log:
         log_run(results, cfg, degree=degree)
 
+    # --- Checkpoints ---
+    if not args.no_save_model:
+        save_checkpoints(results, cfg, in_dim=int(train_data.x.shape[1]),
+                         keep_all=args.save_all_models)
+
     # Drop the tensors now that analysis is done, so nothing downstream
     # accidentally holds the graph in memory or tries to serialise it.
     for r in results.values():
@@ -170,7 +179,7 @@ def main():
             r.pop(k, None)
 
     # --- Plots ---
-    if not args.no_plot:
+    if make_plots and not args.no_plot:
         try:
             import matplotlib
             matplotlib.use("Agg")
@@ -226,6 +235,53 @@ def main():
                 print(f"  {p}")
         except Exception as e:
             print(f"\n(Plot skipped: {e})")
+
+    return results, degree
+
+
+def main():
+    args = parse_args()
+    if args.show_ablation:
+        show_ablation(cfg)
+        return
+
+    cfg.models = tuple(args.models)
+    cfg.epochs = args.epochs
+    cfg.lr = args.lr
+    if args.sampling:
+        cfg.use_neighbor_loader = True
+    if args.features:
+        cfg.feature_mode = args.features
+    if args.hard_negatives:
+        cfg.hard_negatives = True
+    if not args.no_analysis:
+        cfg.per_relation_eval = True
+    if args.per_relation:
+        cfg.per_relation_eval = True
+    if args.disease_focused:
+        cfg.disease_focused_eval = True
+
+    seeds = args.seeds if args.seeds else [args.seed if args.seed is not None
+                                           else cfg.seed]
+
+    print("Device:", get_device())
+    print("Loading + building subgraph...")
+    kg = load_primekg(cfg.data_dir)
+    sub = build_subgraph(kg, cfg.keep_types, cfg.drop_relations)
+    if len(sub) == 0:
+        raise SystemExit(
+            "Subgraph is empty. Run `python explore.py` and fix cfg.keep_types."
+        )
+
+    runs = []
+    for i, seed in enumerate(seeds):
+        # Plot only the first seed: the curves are near-identical across seeds
+        # and writing them all just overwrites the same filenames.
+        results, degree = run_one_seed(args, sub, seed, make_plots=(i == 0))
+        runs.append({"seed": seed, "results": results, "degree": degree})
+
+    if len(runs) > 1:
+        summarize_seeds(runs, cfg)
 
 
 if __name__ == "__main__":

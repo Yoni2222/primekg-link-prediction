@@ -286,6 +286,23 @@ def apply_hard_negatives(train_data, num_nodes, msg_edge_index, cfg=cfg):
     return train_data
 
 
+def seed_everything(seed: int):
+    """Seed every RNG that affects the split, the features and the init.
+
+    This must run before to_pyg_splits(). RandomLinkSplit takes no seed
+    argument -- it draws from torch's global RNG -- so without this the
+    train/val/test partition and the sampled negatives differ on every run.
+    That makes cross-run comparison (random vs text vs rich) meaningless,
+    because each condition is then scored on a different test set.
+    """
+    import random as _r
+    _r.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
     """Turn the subgraph edge table into train/val/test PyG Data objects.
 

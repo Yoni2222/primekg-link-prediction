@@ -149,6 +149,7 @@ def log_run(results, cfg=cfg, degree=None, extra=None):
             "timestamp": stamp,
             "feature_mode": cfg.feature_mode,
             "model": name,
+            "seed": cfg.seed,
             "hard_negatives": cfg.hard_negatives,
             "epochs_configured": cfg.epochs,
             "epochs_run": len(r.get("history") or []),
@@ -195,11 +196,159 @@ def show_ablation(cfg=cfg):
         print("No runs logged yet.")
         return
     df = pd.read_csv(csv_path)
-    keep = ["feature_mode", "model", "hard_negatives",
+    keep = ["feature_mode", "model", "seed", "hard_negatives", "epochs_run",
             "auc", "f1", "mrr"] + [f"hits@{k}" for k in cfg.hits_k]
     keep = [c for c in keep if c in df.columns]
     # Latest run wins for any repeated configuration.
-    df = df.drop_duplicates(subset=["feature_mode", "model", "hard_negatives"],
-                            keep="last")
+    sub = [c for c in ["feature_mode", "model", "seed", "hard_negatives"]
+           if c in df.columns]
+    df = df.drop_duplicates(subset=sub, keep="last")
     print("\nAll logged runs")
     print(df[keep].to_string(index=False))
+
+
+# ----------------------------------------------------------------------
+# Checkpoints
+# ----------------------------------------------------------------------
+
+def save_checkpoints(results, cfg=cfg, in_dim=None, keep_all=False):
+    """Write model weights to results/.
+
+    By default only the best checkpoint per (model, feature_mode) survives:
+    running three seeds across three feature modes would otherwise leave
+    eighteen .pt files with no indication which one to load. "Best" is by
+    validation AUC, the same criterion early stopping already uses, so the
+    saved model is the one the reported metrics describe.
+
+    keep_all=True writes one file per seed instead, for when you actually want
+    to compare weights across seeds.
+    """
+    os.makedirs(cfg.out_dir, exist_ok=True)
+    tag = cfg.feature_mode + ("_hardneg" if cfg.hard_negatives else "")
+
+    for name, r in results.items():
+        model = r.get("_model")
+        if model is None:
+            continue
+        val_auc = r.get("best_val_auc")
+        suffix = f"_seed{cfg.seed}" if keep_all else ""
+        path = os.path.join(cfg.out_dir, f"model_{name}_{tag}{suffix}.pt")
+
+        if not keep_all and os.path.exists(path):
+            try:
+                prev = torch.load(path, map_location="cpu", weights_only=False)
+                if (prev.get("best_val_auc") or 0) >= (val_auc or 0):
+                    print(f"Kept existing {path} "
+                          f"(val AUC {prev.get('best_val_auc'):.4f} >= {val_auc:.4f})")
+                    continue
+            except Exception:
+                pass  # unreadable or old-format checkpoint: just overwrite
+
+        torch.save({
+            "state_dict": model.state_dict(),
+            "conv_type": name,
+            "feature_mode": cfg.feature_mode,
+            "hard_negatives": cfg.hard_negatives,
+            "seed": cfg.seed,
+            "best_val_auc": val_auc,
+            "in_dim": in_dim,
+            "hidden_dim": cfg.hidden_dim,
+            "out_dim": cfg.out_dim,
+            "heads": cfg.gat_heads,
+            "dropout": cfg.dropout,
+            "test_metrics": r.get("test_metrics"),
+        }, path)
+        print(f"Saved {path}  (val AUC {val_auc:.4f}, seed {cfg.seed})")
+
+
+# ----------------------------------------------------------------------
+# Multi-seed summary
+# ----------------------------------------------------------------------
+
+_SUMMARY_METRICS = ["auc", "ap", "f1", "accuracy", "mrr"]
+
+
+def summarize_seeds(runs, cfg=cfg):
+    """Aggregate several seeds of the same configuration.
+
+    Two different summaries, because the two tables have very different
+    sample sizes behind them.
+
+    Aggregate metrics are averaged with a standard deviation: they rest on
+    tens of thousands of test edges per seed, so mean +/- std is meaningful.
+
+    Degree buckets are NOT averaged. The sparse buckets hold on the order of
+    tens of edges, and a standard deviation over three points there would
+    imply a precision the data does not support. Instead this reports how many
+    seeds each model won in each bucket -- "GAT wins the 1-2 bucket in 3 of 3
+    seeds" is a claim the evidence actually supports.
+    """
+    seeds = [r["seed"] for r in runs]
+    models = list(runs[0]["results"].keys())
+    ks = cfg.hits_k
+
+    print(f"\n\n{'=' * 60}")
+    print(f"Across {len(runs)} seeds: {seeds}")
+    print("=" * 60)
+
+    cols = [("auc", "AUC"), ("ap", "AP"), ("f1", "F1"),
+            ("accuracy", "Acc"), ("mrr", "MRR")] + [(f"hits@{k}", f"H@{k}") for k in ks]
+    print(f"\n{'Model':<7}" + "".join(f"{lbl:>16}" for _, lbl in cols))
+    print("-" * (7 + 16 * len(cols)))
+    for m in models:
+        cells = ""
+        for key, _ in cols:
+            vals = [r["results"][m]["test_metrics"].get(key) for r in runs]
+            vals = [v for v in vals if v is not None]
+            if not vals:
+                cells += f"{'-':>16}"
+                continue
+            cells += f"{np.mean(vals):>10.4f}±{np.std(vals):.3f}"
+        print(f"{m.upper():<7}" + cells)
+
+    epochs = {m: [len(r["results"][m].get("history") or []) for r in runs]
+              for m in models}
+    print("\nEpochs run per seed (early stopping):")
+    for m in models:
+        print(f"  {m.upper():<5} {epochs[m]}")
+
+    # --- degree consistency ---
+    if not all(r.get("degree") for r in runs):
+        return
+    labels = [_bucket_label(lo, hi) for lo, hi in DEFAULT_BUCKETS]
+    print("\nMRR by degree bucket, per seed")
+    print("Scores are listed per seed rather than as mean/std: the sparse")
+    print("buckets hold only tens of edges, too few for a standard deviation")
+    print("to carry meaning. The win count says whether the ordering is")
+    print("consistent; the scores say whether the gap is worth reporting.")
+
+    for lab in labels:
+        n = runs[0]["degree"].get(models[0], {}).get(lab, {}).get("n", 0)
+        if not n:
+            continue
+        print(f"\n  degree {lab}  (n = {n:,})")
+        for m in models:
+            vals = [(r["degree"].get(m, {}).get(lab, {}) or {}).get("mrr")
+                    for r in runs]
+            shown = "  ".join("  -  " if v is None else f"{v:.4f}" for v in vals)
+            present = [v for v in vals if v is not None]
+            mean = f"{np.mean(present):.4f}" if present else "-"
+            print(f"    {m.upper():<5} {shown}   mean {mean}")
+
+        # Win count and the size of the gap, seed by seed.
+        wins = {m: 0 for m in models}
+        gaps = []
+        for r in runs:
+            scores = {m: (r["degree"].get(m, {}).get(lab, {}) or {}).get("mrr")
+                      for m in models}
+            scores = {m: v for m, v in scores.items() if v is not None}
+            if len(scores) < 2:
+                continue
+            ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+            wins[ranked[0][0]] += 1
+            best, second = ranked[0][1], ranked[1][1]
+            gaps.append(best / second if second > 0 else float("nan"))
+        if gaps:
+            wl = ", ".join(f"{m.upper()} {wins[m]}/{len(runs)}" for m in models)
+            print(f"    wins: {wl}   |  winner's margin x{np.nanmean(gaps):.2f} "
+                  f"(range x{np.nanmin(gaps):.2f}-x{np.nanmax(gaps):.2f})")
