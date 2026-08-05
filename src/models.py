@@ -24,7 +24,20 @@ layer_norm
     scaled by neighbourhood size, which is a plausible cause of the training
     instability observed here (GAT early-stopped at 351 / 90 / 167 epochs
     across three seeds of one configuration, against GCN's 52 / 32 / 65).
-    LayerNorm after each conv removes that scale dependence.
+
+    The norm is applied to the HIDDEN layer only, never to the output. The
+    decoder is a dot product, so a pair's score depends on both the angle
+    between the two embeddings and their magnitudes. Normalising the output
+    forces every node to roughly the same magnitude and destroys that second
+    channel, which had been encoding how connected a node is. Doing so
+    measured on this graph: AUC 0.9213 -> 0.8590 and accuracy 0.856 -> 0.696
+    for GCN, a model LayerNorm was not even supposed to affect much. The
+    symmetric damage to both conv types is the tell that the decoder, not the
+    convolution, was what broke.
+
+    LayerNorm on the output is available as layer_norm_output for anyone who
+    wants to reproduce that result deliberately. It should not be switched on
+    otherwise.
 
 dropout
     Exposed on the CLI. The 0.5 default is aggressive for attention models,
@@ -49,12 +62,15 @@ class GNNLinkPredictor(torch.nn.Module):
         dropout: float = 0.5,
         match_capacity: bool = False,
         layer_norm: bool = False,
+        layer_norm_output: bool = False,
     ):
         super().__init__()
         self.conv_type = conv_type
         self.dropout = dropout
         self.match_capacity = match_capacity
         self.use_layer_norm = layer_norm
+        # Off by default and intentionally hard to reach: see the docstring.
+        self.use_layer_norm_output = layer_norm_output
 
         if conv_type == "gcn":
             self.conv1 = GCNConv(in_dim, hidden_dim)
@@ -83,6 +99,7 @@ class GNNLinkPredictor(torch.nn.Module):
         self.hidden_out_dim = h1
         if layer_norm:
             self.norm1 = torch.nn.LayerNorm(h1)
+        if layer_norm_output:
             self.norm2 = torch.nn.LayerNorm(out_dim)
 
     def num_parameters(self) -> int:
@@ -95,7 +112,9 @@ class GNNLinkPredictor(torch.nn.Module):
         x = x.relu()
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.conv2(x, edge_index)
-        if self.use_layer_norm:
+        # Deliberately NOT normalised by default: the dot-product decoder reads
+        # embedding magnitude as signal.
+        if self.use_layer_norm_output:
             x = self.norm2(x)
         return x
 

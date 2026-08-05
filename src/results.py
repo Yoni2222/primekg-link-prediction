@@ -153,6 +153,7 @@ def log_run(results, cfg=cfg, degree=None, extra=None):
             "hard_negatives": cfg.hard_negatives,
             "match_capacity": cfg.match_capacity,
             "layer_norm": cfg.layer_norm,
+            "layer_norm_output": cfg.layer_norm_output,
             "dropout": cfg.dropout,
             "epochs_configured": cfg.epochs,
             "epochs_run": len(r.get("history") or []),
@@ -236,6 +237,8 @@ def save_checkpoints(results, cfg=cfg, in_dim=None, keep_all=False):
         tag += "_matched"
     if cfg.layer_norm:
         tag += "_ln"
+    if cfg.layer_norm_output:
+        tag += "_lnout"
 
     for name, r in results.items():
         model = r.get("_model")
@@ -262,6 +265,7 @@ def save_checkpoints(results, cfg=cfg, in_dim=None, keep_all=False):
             "hard_negatives": cfg.hard_negatives,
             "match_capacity": cfg.match_capacity,
             "layer_norm": cfg.layer_norm,
+            "layer_norm_output": cfg.layer_norm_output,
             "dropout": cfg.dropout,
             "seed": cfg.seed,
             "best_val_auc": val_auc,

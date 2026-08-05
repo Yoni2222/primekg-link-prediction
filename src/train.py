@@ -356,6 +356,7 @@ def run_experiment(conv_type, train_data, val_data, test_data, cfg=cfg, verbose=
         train_data.x.shape[1], cfg.hidden_dim, cfg.out_dim,
         conv_type=conv_type, heads=cfg.gat_heads, dropout=cfg.dropout,
         match_capacity=cfg.match_capacity, layer_norm=cfg.layer_norm,
+        layer_norm_output=cfg.layer_norm_output,
     ).to(device)
     print(f"  {conv_type.upper()} parameters: {model.num_parameters():,} "
           f"(hidden out {model.hidden_out_dim})")
@@ -471,6 +472,7 @@ def run_experiment_sampled(conv_type, train_data, val_data, test_data, cfg=cfg, 
         train_data.x.shape[1], cfg.hidden_dim, cfg.out_dim,
         conv_type=conv_type, heads=cfg.gat_heads, dropout=cfg.dropout,
         match_capacity=cfg.match_capacity, layer_norm=cfg.layer_norm,
+        layer_norm_output=cfg.layer_norm_output,
     ).to(device)
     print(f"  {conv_type.upper()} parameters: {model.num_parameters():,} "
           f"(hidden out {model.hidden_out_dim})")

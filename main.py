@@ -58,7 +58,10 @@ def parse_args():
                    help="give GAT hidden_dim//heads per head so both encoders "
                         "emit hidden_dim channels (validity fix, not tuning)")
     p.add_argument("--layer-norm", action="store_true",
-                   help="LayerNorm after each conv, applied to both models")
+                   help="LayerNorm on the hidden layer, applied to both models")
+    p.add_argument("--layer-norm-output", action="store_true",
+                   help="also normalise the output; breaks the dot-product "
+                        "decoder, kept only to reproduce that result")
     p.add_argument("--dropout", type=float, default=None,
                    help="override cfg.dropout (default 0.5)")
     p.add_argument("--seeds", type=int, nargs="+", default=None,
@@ -205,7 +208,8 @@ def run_one_seed(args, sub, seed, make_plots=True):
             plt.legend(); plt.grid(alpha=0.3)
             tag = (cfg.feature_mode + ("_hardneg" if cfg.hard_negatives else "")
                    + ("_matched" if cfg.match_capacity else "")
-                   + ("_ln" if cfg.layer_norm else ""))
+                   + ("_ln" if cfg.layer_norm else "")
+                   + ("_lnout" if cfg.layer_norm_output else ""))
             p1 = os.path.join(cfg.out_dir, f"val_auc_curves_{tag}.png")
             plt.savefig(p1, dpi=150, bbox_inches="tight"); plt.close(); saved.append(p1)
 
@@ -273,6 +277,8 @@ def main():
         cfg.match_capacity = True
     if args.layer_norm:
         cfg.layer_norm = True
+    if args.layer_norm_output:
+        cfg.layer_norm_output = True
     if args.dropout is not None:
         cfg.dropout = args.dropout
 

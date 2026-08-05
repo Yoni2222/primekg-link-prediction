@@ -80,7 +80,12 @@ class Config:
     # layer_norm: GCNConv normalises by degree internally, GATConv does not.
     # On a graph with degrees from 1 to several hundred that leaves GAT's
     # activations scaled by neighbourhood size.
+    # Hidden layer only. The output stays un-normalised because the decoder
+    # is a dot product and reads embedding magnitude as signal; normalising it
+    # measured AUC 0.9213 -> 0.8590 for GCN on this graph.
     layer_norm: bool = False
+    # Reproduces that failure on purpose. Leave False.
+    layer_norm_output: bool = False
 
     # --- Training ---
     epochs: int = 300
