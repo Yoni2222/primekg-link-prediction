@@ -151,6 +151,9 @@ def log_run(results, cfg=cfg, degree=None, extra=None):
             "model": name,
             "seed": cfg.seed,
             "hard_negatives": cfg.hard_negatives,
+            "match_capacity": cfg.match_capacity,
+            "layer_norm": cfg.layer_norm,
+            "dropout": cfg.dropout,
             "epochs_configured": cfg.epochs,
             "epochs_run": len(r.get("history") or []),
             "best_val_auc": r.get("best_val_auc"),
@@ -196,11 +199,13 @@ def show_ablation(cfg=cfg):
         print("No runs logged yet.")
         return
     df = pd.read_csv(csv_path)
-    keep = ["feature_mode", "model", "seed", "hard_negatives", "epochs_run",
+    keep = ["feature_mode", "model", "seed", "hard_negatives",
+            "match_capacity", "layer_norm", "dropout", "epochs_run",
             "auc", "f1", "mrr"] + [f"hits@{k}" for k in cfg.hits_k]
     keep = [c for c in keep if c in df.columns]
     # Latest run wins for any repeated configuration.
-    sub = [c for c in ["feature_mode", "model", "seed", "hard_negatives"]
+    sub = [c for c in ["feature_mode", "model", "seed", "hard_negatives",
+                       "match_capacity", "layer_norm", "dropout"]
            if c in df.columns]
     df = df.drop_duplicates(subset=sub, keep="last")
     print("\nAll logged runs")
@@ -225,6 +230,12 @@ def save_checkpoints(results, cfg=cfg, in_dim=None, keep_all=False):
     """
     os.makedirs(cfg.out_dir, exist_ok=True)
     tag = cfg.feature_mode + ("_hardneg" if cfg.hard_negatives else "")
+    # Architecture variants are different models, not better runs of the same
+    # one -- they must not overwrite each other's "best" checkpoint.
+    if cfg.match_capacity:
+        tag += "_matched"
+    if cfg.layer_norm:
+        tag += "_ln"
 
     for name, r in results.items():
         model = r.get("_model")
@@ -249,6 +260,9 @@ def save_checkpoints(results, cfg=cfg, in_dim=None, keep_all=False):
             "conv_type": name,
             "feature_mode": cfg.feature_mode,
             "hard_negatives": cfg.hard_negatives,
+            "match_capacity": cfg.match_capacity,
+            "layer_norm": cfg.layer_norm,
+            "dropout": cfg.dropout,
             "seed": cfg.seed,
             "best_val_auc": val_auc,
             "in_dim": in_dim,

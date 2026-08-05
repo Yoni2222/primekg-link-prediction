@@ -68,6 +68,20 @@ class Config:
     gat_heads: int = 4
     dropout: float = 0.5
 
+    # --- Optional architecture modifications (all off by default) ---
+    # Applied to BOTH conv types, never to one alone: fixing only GAT would
+    # confound the GCN-vs-GAT comparison the project rests on.
+    #
+    # match_capacity: GATConv concatenates heads, so heads=4 with hidden_dim=64
+    # emits 256 channels against GCN's 64 -- roughly 4x the parameters. With
+    # this on, GAT uses hidden_dim // heads per head so both emit hidden_dim.
+    # Requires hidden_dim divisible by gat_heads.
+    match_capacity: bool = False
+    # layer_norm: GCNConv normalises by degree internally, GATConv does not.
+    # On a graph with degrees from 1 to several hundred that leaves GAT's
+    # activations scaled by neighbourhood size.
+    layer_norm: bool = False
+
     # --- Training ---
     epochs: int = 300
     lr: float = 0.01
