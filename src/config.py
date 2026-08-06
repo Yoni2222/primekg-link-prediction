@@ -76,6 +76,13 @@ class Config:
     # emits 256 channels against GCN's 64 -- roughly 4x the parameters. With
     # this on, GAT uses hidden_dim // heads per head so both emit hidden_dim.
     # Requires hidden_dim divisible by gat_heads.
+    # --- Node identity ---
+    # "index": dedupe nodes on PrimeKG's global node index (correct).
+    # "id":    dedupe on the bare source accession, which merges nodes whose
+    #          accessions collide across ontologies (MONDO 11123 vs HPO 11123).
+    #          Reproduces results generated before this was found.
+    node_key: str = "index"
+
     match_capacity: bool = False
     # layer_norm: GCNConv normalises by degree internally, GATConv does not.
     # On a graph with degrees from 1 to several hundred that leaves GAT's
@@ -123,7 +130,9 @@ class Config:
     rank_eval_batch: int = 2048       # batch size for MRR/Hits ranking eval
     per_relation_eval: bool = False   # break down final test metrics by relation type
     per_relation_min_edges: int = 50  # relations with fewer test positives -> '(other)'
-    disease_focused_eval: bool = False  # also report unified metrics on disease-touching edges only
+    # On by default: disease-touching edges are what the project is actually
+    # about, and the breakdown reuses the trained model for a few seconds.
+    disease_focused_eval: bool = True
 
     # --- Which models to compare ---
     models: tuple = ("gcn", "gat")

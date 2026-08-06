@@ -41,12 +41,12 @@ def main():
     print("\n=== coverage by node type in your subgraph ===")
     nodes = node_table(sub)
     for ntype, grp in nodes.groupby("type"):
-        ids = grp["id"].tolist()
+        ids = grp["key"].tolist()
         hit = sum(1 for i in ids if i in text_map)
         pct = 100 * hit / len(ids) if ids else 0.0
         print(f"  {ntype:18s} {hit:6,} / {len(ids):6,}  ({pct:5.1f}%)")
 
-    covered = sum(1 for i in nodes["id"] if i in text_map)
+    covered = sum(1 for i in nodes["key"] if i in text_map)
     print(f"  {'TOTAL':18s} {covered:6,} / {len(nodes):6,}  "
           f"({100 * covered / len(nodes):5.1f}%)")
 
@@ -68,7 +68,7 @@ def main():
     if args.dump:
         print("\n=== examples ===")
         for ntype in ("disease", "drug"):
-            ids = nodes[nodes["type"] == ntype]["id"].tolist()
+            ids = nodes[nodes["type"] == ntype]["key"].tolist()
             shown = 0
             for i in ids:
                 if i in text_map:

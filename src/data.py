@@ -29,18 +29,75 @@ def load_primekg(data_dir: str = cfg.data_dir) -> pd.DataFrame:
             f"and place it in '{data_dir}/'."
         )
     print(f"Loading {csv_path} ...")
-    return pd.read_csv(csv_path, low_memory=False)
+    # x_id / y_id are forced to str. PrimeKG mixes accession styles in one
+    # column ("DB00001" for drugs, "11123" for MONDO diseases), and pandas
+    # would otherwise infer a different dtype per column depending on what
+    # happens to be present -- making an int 11123 in one column fail to match
+    # the string "11123" in the other, silently.
+    return pd.read_csv(csv_path, low_memory=False,
+                       dtype={"x_id": str, "y_id": str})
 
 
-def node_table(kg: pd.DataFrame) -> pd.DataFrame:
-    """Return a deduplicated (id, type) table built from both edge endpoints."""
-    nodes = pd.concat(
-        [
+def node_table(kg: pd.DataFrame, key: str = None) -> pd.DataFrame:
+    """Return one row per node, built from both edge endpoints.
+
+    key="index" (default): dedupe on PrimeKG's global node index. This is
+    unique by construction across the whole graph.
+
+    key="id": dedupe on the source-database accession. THIS MERGES DISTINCT
+    NODES. PrimeKG stores x_id as the bare accession with no prefix, and each
+    source ontology numbers itself from 1, so MONDO 11123 (a disease) and
+    HPO 11123 (a phenotype) are both the string "11123". Deduping on that
+    collapses them into one node that inherits both nodes' edges and so has an
+    inflated degree. Kept only to reproduce results generated before this was
+    found; see compare_node_keying() for the size of the effect.
+    """
+    key = key or cfg.node_key
+    if key == "index":
+        cols = ("x_index", "y_index")
+        if cols[0] not in kg.columns:
+            raise KeyError(
+                "kg.csv has no x_index/y_index column; set cfg.node_key='id' "
+                "(and read the warning in node_table's docstring)."
+            )
+        nodes = pd.concat([
+            kg[["x_index", "x_id", "x_type"]].rename(
+                columns={"x_index": "key", "x_id": "id", "x_type": "type"}),
+            kg[["y_index", "y_id", "y_type"]].rename(
+                columns={"y_index": "key", "y_id": "id", "y_type": "type"}),
+        ]).drop_duplicates("key")
+    elif key == "id":
+        nodes = pd.concat([
             kg[["x_id", "x_type"]].rename(columns={"x_id": "id", "x_type": "type"}),
             kg[["y_id", "y_type"]].rename(columns={"y_id": "id", "y_type": "type"}),
-        ]
-    ).drop_duplicates("id")
+        ]).drop_duplicates("id")
+        nodes["key"] = nodes["id"]
+    else:
+        raise ValueError("node_key must be 'index' or 'id'")
     return nodes
+
+
+def compare_node_keying(kg: pd.DataFrame) -> dict:
+    """Quantify how many nodes the legacy id-keying merges. Read-only."""
+    by_index = node_table(kg, key="index")
+    by_id = node_table(kg, key="id")
+    pairs = pd.concat([
+        kg[["x_index", "x_id", "x_type"]].rename(
+            columns={"x_index": "index", "x_id": "id", "x_type": "type"}),
+        kg[["y_index", "y_id", "y_type"]].rename(
+            columns={"y_index": "index", "y_id": "id", "y_type": "type"}),
+    ]).drop_duplicates()
+    per_id = pairs.groupby("id")["index"].nunique()
+    collided = per_id[per_id > 1]
+    cross_type = pairs[pairs["id"].isin(collided.index)].groupby("id")["type"].nunique()
+    return {
+        "nodes_by_index": len(by_index),
+        "nodes_by_id": len(by_id),
+        "nodes_lost_to_merging": len(by_index) - len(by_id),
+        "colliding_ids": len(collided),
+        "colliding_ids_across_types": int((cross_type > 1).sum()),
+        "worst_merge": int(collided.max()) if len(collided) else 0,
+    }
 
 
 def build_subgraph(
@@ -68,7 +125,7 @@ def _node_name_map(sub: pd.DataFrame) -> dict:
     return names.set_index("id")["name"].to_dict()
 
 
-def _build_rich_features(all_ids, sub, cfg=cfg):
+def _build_rich_features(all_ids, sub, cfg=cfg, all_keys=None):
     """Sentence embeddings of PrimeKG's per-node attribute text.
 
     Only disease and drug nodes have attribute text in PrimeKG. Every other
@@ -107,9 +164,13 @@ def _build_rich_features(all_ids, sub, cfg=cfg):
     )
     name_map = _node_name_map(sub)
 
+    # text_map is keyed the same way node identity is (PrimeKG index by
+    # default, accession in legacy mode); names always come from the accession.
+    lookup_keys = list(all_keys) if all_keys is not None else list(all_ids)
+
     texts, has_rich = [], []
-    for nid in all_ids:
-        rich = text_map.get(nid)
+    for lk, nid in zip(lookup_keys, all_ids):
+        rich = text_map.get(lk)
         if rich:
             texts.append(rich)
             has_rich.append(1.0)
@@ -135,7 +196,7 @@ def _build_rich_features(all_ids, sub, cfg=cfg):
     return torch.tensor(emb, dtype=torch.float)
 
 
-def build_node_features(all_ids, sub, cfg=cfg):
+def build_node_features(all_ids, sub, cfg=cfg, all_keys=None):
     """Return a [num_nodes, D] feature tensor according to cfg.feature_mode.
 
     "random":   random vectors of size cfg.feature_dim.
@@ -155,7 +216,7 @@ def build_node_features(all_ids, sub, cfg=cfg):
         return torch.randn(num_nodes, cfg.feature_dim)
 
     if cfg.feature_mode == "rich":
-        return _build_rich_features(all_ids, sub, cfg)
+        return _build_rich_features(all_ids, sub, cfg, all_keys)
 
     if cfg.feature_mode in ("text", "text_pca"):
         import os
@@ -313,18 +374,26 @@ def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
     Returns (train_data, val_data, test_data, meta).
     """
     nodes = node_table(sub)
-    all_ids = pd.Index(nodes["id"].unique())
-    id2idx = {nid: i for i, nid in enumerate(all_ids)}
-    num_nodes = len(all_ids)
+    all_keys = pd.Index(nodes["key"].unique())
+    key2idx = {k: i for i, k in enumerate(all_keys)}
+    num_nodes = len(all_keys)
 
-    type_map = nodes.set_index("id")["type"].to_dict()
-    node_type_arr = np.array([type_map[nid] for nid in all_ids])
+    type_map = nodes.set_index("key")["type"].to_dict()
+    node_type_arr = np.array([type_map[k] for k in all_keys])
 
-    src = sub["x_id"].map(id2idx).to_numpy()
-    dst = sub["y_id"].map(id2idx).to_numpy()
+    # Node identity is `key` (the PrimeKG index by default). `all_ids` carries
+    # the matching accessions in the same order, for feature lookup and for
+    # anything that reports human-readable identifiers.
+    id_by_key = nodes.set_index("key")["id"].to_dict()
+    all_ids = pd.Index([id_by_key[k] for k in all_keys])
+
+    edge_key_cols = ("x_index", "y_index") if cfg.node_key == "index" \
+        else ("x_id", "y_id")
+    src = sub[edge_key_cols[0]].map(key2idx).to_numpy()
+    dst = sub[edge_key_cols[1]].map(key2idx).to_numpy()
     edge_index = torch.tensor(np.vstack([src, dst]), dtype=torch.long)
 
-    x = build_node_features(all_ids, sub, cfg)
+    x = build_node_features(all_ids, sub, cfg, all_keys=all_keys)
     data = Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
 
     if cfg.target_relations:
@@ -351,7 +420,8 @@ def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
         )
         train_data, val_data, test_data = transform(data)
 
-    meta = {"id2idx": id2idx, "node_type_arr": node_type_arr,
+    meta = {"id2idx": key2idx, "key2idx": key2idx, "all_ids": all_ids,
+            "node_type_arr": node_type_arr,
             "num_nodes": num_nodes, "feature_dim": x.shape[1]}
 
     # Build an undirected (src_idx, dst_idx) -> relation lookup so evaluation can

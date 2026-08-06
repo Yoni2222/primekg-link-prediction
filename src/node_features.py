@@ -46,6 +46,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from .config import cfg
+
 # --------------------------------------------------------------------------
 # Column selection
 # --------------------------------------------------------------------------
@@ -256,11 +258,38 @@ def build_text_map(kg: pd.DataFrame, data_dir: str,
         print(f"drug_features.tab:    {len(drug):,} rows -> "
               f"{drug.node_index.nunique():,} nodes")
 
+    graph_indices = set(
+        pd.concat([kg["x_index"], kg["y_index"]]).astype(int).unique()
+    ) if "x_index" in kg.columns else set()
+
     dis_t = collapse_diseases(dis, risky_disease)
     dis_t["expect"] = "disease"
     drug_t = collapse_drugs(drug, risky_drug)
     drug_t["expect"] = "drug"
     combined = pd.concat([dis_t, drug_t], ignore_index=True)
+
+    # With cfg.node_key == "index" (the default), src/data.py keys nodes on the
+    # PrimeKG index, which is exactly what the feature tables use -- no bridge
+    # needed and no ambiguity possible. The id path below is only reached in
+    # legacy mode.
+    if getattr(cfg, "node_key", "index") == "index":
+        text_map = {}
+        unmatched = 0
+        for row in combined.itertuples(index=False):
+            ni = int(row.node_index)
+            if ni not in graph_indices:
+                unmatched += 1
+                continue
+            if row.text:
+                text_map[ni] = row.text
+        if verbose:
+            lens = np.array([len(t) for t in text_map.values()])
+            print(f"Built text for {len(text_map):,} nodes "
+                  f"({unmatched:,} feature rows had no edge in the subgraph)")
+            if lens.size:
+                print(f"  text length chars: median {int(np.median(lens))}, "
+                      f"p90 {int(np.percentile(lens, 90))}, max {int(lens.max())}")
+        return text_map
 
     idx2id, id2types = index_to_id_map(kg)
 

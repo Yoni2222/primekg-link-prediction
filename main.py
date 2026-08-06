@@ -35,7 +35,10 @@ def parse_args():
                    help="use 2-hop hard negatives for training")
     p.add_argument("--per-relation", action="store_true",
                    help="break down final test metrics by relation type")
+    p.add_argument("--no-disease-focused", action="store_true",
+                   help="skip the disease-touching-edges breakdown")
     p.add_argument("--disease-focused", action="store_true",
+                   # now the default; kept so existing commands still run
                    help="also report unified metrics on disease-touching edges only")
     p.add_argument("--no-plot", action="store_true")
     p.add_argument("--by-degree", action="store_true",
@@ -54,6 +57,9 @@ def parse_args():
                    help="do not write .pt checkpoints")
     p.add_argument("--save-all-models", action="store_true",
                    help="keep a checkpoint per seed instead of only the best")
+    p.add_argument("--node-key", choices=["index", "id"], default=None,
+                   help="'index' (default, correct) or 'id' (legacy, merges "
+                        "nodes whose accessions collide across ontologies)")
     p.add_argument("--match-capacity", action="store_true",
                    help="give GAT hidden_dim//heads per head so both encoders "
                         "emit hidden_dim channels (validity fix, not tuning)")
@@ -271,8 +277,10 @@ def main():
         cfg.per_relation_eval = True
     if args.per_relation:
         cfg.per_relation_eval = True
-    if args.disease_focused:
-        cfg.disease_focused_eval = True
+    if args.no_disease_focused:
+        cfg.disease_focused_eval = False
+    if args.node_key:
+        cfg.node_key = args.node_key
     if args.match_capacity:
         cfg.match_capacity = True
     if args.layer_norm:
@@ -293,6 +301,14 @@ def main():
         raise SystemExit(
             "Subgraph is empty. Run `python explore.py` and fix cfg.keep_types."
         )
+
+    from src.data import compare_node_keying
+    stats = compare_node_keying(sub)
+    print(f"Node keying: '{cfg.node_key}'  |  by index {stats['nodes_by_index']:,} "
+          f"nodes, by id {stats['nodes_by_id']:,} "
+          f"({stats['nodes_lost_to_merging']:,} would be merged; "
+          f"{stats['colliding_ids_across_types']:,} collisions cross node types, "
+          f"worst merges {stats['worst_merge']} nodes)")
 
     runs = []
     for i, seed in enumerate(seeds):
