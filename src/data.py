@@ -275,12 +275,20 @@ def _existing_edge_set(edge_index):
     return s
 
 
-def make_hard_negatives(train_data, num_nodes, n_hard, msg_edge_index, seed=0):
-    """Generate ~n_hard '2-hop' negative edges: pairs (u, w) where u and w share
-    a common neighbor v (so they're structurally plausible) but have no real edge.
+def make_hard_negatives(train_data, num_nodes, n_hard, msg_edge_index, seed=0,
+                        held_out=None):
+    """Generate ~n_hard '2-hop' negative edges: pairs (u, w) sharing a common
+    neighbour v (structurally plausible) but with no real edge between them.
 
-    Returns a [2, M] tensor of negative edges (M may be < n_hard if sampling
-    runs out of attempts). Uses the message-passing graph to find neighbors.
+    `held_out` must carry the val/test positive edges. They are edges that DO
+    exist in the graph; they are simply hidden from training. Without them in
+    the exclusion set, a 2-hop pair drawn here can be one of them, and the
+    model is then trained to push down exactly the edges it is scored on --
+    labelled 0 in training and 1 at evaluation. Two-hop pairs are precisely the
+    shape a held-out edge takes, so this is not a rare accident.
+
+    Returns a [2, M] tensor (M may be < n_hard if sampling runs out of
+    attempts). Uses the message-passing graph to find neighbours.
     """
     import random as _random
     rng = _random.Random(seed)
@@ -294,11 +302,25 @@ def make_hard_negatives(train_data, num_nodes, n_hard, msg_edge_index, seed=0):
     nodes_with_nbrs = [n for n in adj if adj[n]]
 
     existing = _existing_edge_set(msg_edge_index)
-    # Also treat the positive supervision edges as existing.
+    # Positive supervision edges.
     pos_mask = train_data.edge_label == 1
     existing |= _existing_edge_set(train_data.edge_label_index[:, pos_mask])
+    # Held-out val/test positives. These are real edges; excluding them is what
+    # keeps a "hard negative" from being a true edge the model will be tested
+    # on. See the docstring.
+    # held_set is built below; fold it into the exclusion set.
+
+    held_set = set()
+    for d in (held_out or []):
+        if d is None:
+            continue
+        m = d.edge_label == 1
+        held_set |= _existing_edge_set(d.edge_label_index[:, m])
+
+    existing |= held_set
 
     hard = []
+    n_would_have_leaked = 0
     attempts = 0
     max_attempts = n_hard * 20
     while len(hard) < n_hard and attempts < max_attempts:
@@ -309,20 +331,40 @@ def make_hard_negatives(train_data, num_nodes, n_hard, msg_edge_index, seed=0):
         if not adj.get(v):
             continue
         w = rng.choice(adj[v])
-        if w == u or (u, w) in existing:
+        if w == u:
+            continue
+        if (u, w) in existing:
+            # Count the ones rejected *because* they are held-out true edges.
+            # That number is the contamination the old code silently accepted;
+            # print it so the size of the effect is measured, not assumed.
+            if (u, w) in held_set:
+                n_would_have_leaked += 1
             continue
         hard.append((u, w))
         existing.add((u, w)); existing.add((w, u))  # avoid duplicates
+
+    if held_set:
+        print(f"  hard-negative draws rejected as held-out true edges: "
+              f"{n_would_have_leaked:,} of {attempts:,} attempts "
+              f"({100 * n_would_have_leaked / max(attempts, 1):.2f}%)")
 
     if not hard:
         return torch.empty((2, 0), dtype=torch.long)
     return torch.tensor(np.array(hard).T, dtype=torch.long)
 
 
-def apply_hard_negatives(train_data, num_nodes, msg_edge_index, cfg=cfg):
+def apply_hard_negatives(train_data, num_nodes, msg_edge_index, cfg=cfg,
+                         held_out=None):
     """Replace a fraction of the training split's random negatives with hard ones.
 
-    Val/test splits are left untouched (random negatives) for fair evaluation.
+    This changes TRAINING ONLY. Val/test negatives stay uniformly sampled, so
+    the evaluation task is identical with and without this flag. A change in
+    reported metrics is therefore a change in what training produced, not a
+    harder benchmark -- read the two runs as an ablation on negative sampling,
+    not as an easy/hard task pair.
+
+    `held_out` should be (val_data, test_data) so their positives can be kept
+    out of the hard-negative pool.
     """
     labels = train_data.edge_label
     eidx = train_data.edge_label_index
@@ -332,7 +374,11 @@ def apply_hard_negatives(train_data, num_nodes, msg_edge_index, cfg=cfg):
     if n_hard == 0:
         return train_data
 
-    hard = make_hard_negatives(train_data, num_nodes, n_hard, msg_edge_index, cfg.seed)
+    hard = make_hard_negatives(train_data, num_nodes, n_hard, msg_edge_index,
+                               cfg.seed, held_out=held_out)
+    n_held_report = sum(
+        int((d.edge_label == 1).sum()) for d in (held_out or []) if d is not None
+    )
     if hard.shape[1] == 0:
         print("Warning: no hard negatives found; keeping random negatives.")
         return train_data
@@ -342,8 +388,9 @@ def apply_hard_negatives(train_data, num_nodes, msg_edge_index, cfg=cfg):
     eidx = eidx.clone()
     eidx[:, neg_positions] = hard.to(eidx.device)
     train_data.edge_label_index = eidx
-    print(f"Hard negatives: replaced {hard.shape[1]:,} of {n_neg:,} train negatives "
-          f"with 2-hop pairs")
+    print(f"Hard negatives: replaced {hard.shape[1]:,} of {n_neg:,} train "
+          f"negatives with 2-hop pairs (excluded {n_held_report:,} held-out "
+          f"positives from the pool)")
     return train_data
 
 
@@ -448,7 +495,8 @@ def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
 
     if cfg.hard_negatives:
         train_data = apply_hard_negatives(
-            train_data, num_nodes, train_data.edge_index, cfg
+            train_data, num_nodes, train_data.edge_index, cfg,
+            held_out=(val_data, test_data),
         )
 
     return train_data, val_data, test_data, meta
