@@ -396,6 +396,18 @@ def to_pyg_splits(sub: pd.DataFrame, cfg=cfg):
     x = build_node_features(all_ids, sub, cfg, all_keys=all_keys)
     data = Data(x=x, edge_index=edge_index, num_nodes=num_nodes)
 
+    # Re-seed here, after features and before the split.
+    #
+    # RandomLinkSplit takes no seed argument; it draws from torch's global RNG.
+    # feature_mode='random' draws a num_nodes x dim matrix immediately above,
+    # advancing that RNG by millions of values, while 'text' and 'rich' load
+    # from a cache and draw nothing. Seeding only once at the start of the run
+    # therefore hands 'random' a different train/val/test partition from the
+    # other two, and any random-vs-text gap is then partly split variance
+    # rather than a feature effect. Re-seeding restores the RNG to a fixed
+    # point so all feature modes are scored on identical test edges.
+    seed_everything(cfg.seed)
+
     if cfg.target_relations:
         # Mark which edges are eligible to be supervision targets.
         is_target = sub["display_relation"].isin(set(cfg.target_relations)).to_numpy()
